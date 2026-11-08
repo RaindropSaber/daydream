@@ -1,0 +1,30 @@
+# User workspaces, API keys and local environment
+/data/
+/output/
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.sqlite3
+*.sqlite3-*
+*.db
+*.log
+
+# Dependencies and generated files
+.venv/
+venv/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage/
+dist/
+build/
+*.egg-info/
+.DS_Store
+seedance.json
+
+# Next.js and TypeScript output
+.next/
+*.tsbuildinfo

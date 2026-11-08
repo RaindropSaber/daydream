@@ -1,0 +1,76 @@
+@import "tailwindcss";
+@custom-variant dark (&:is(.dark *));
+:root {
+  --background: #f7f8fa;
+  --foreground: #202630;
+  --card: #ffffff;
+  --card-foreground: #202630;
+  --popover: #ffffff;
+  --popover-foreground: #202630;
+  --primary: #4263eb;
+  --primary-foreground: #ffffff;
+  --secondary: #eef1f7;
+  --secondary-foreground: #536076;
+  --muted: #f0f2f6;
+  --muted-foreground: #7a8495;
+  --accent: #edf1fe;
+  --accent-foreground: #4263eb;
+  --destructive: #c44f44;
+  --border: #e4e8ef;
+  --input: #dce2ec;
+  --ring: #91a6f3;
+  --radius: 0.625rem;
+}
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+}
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  button:not(:disabled),
+  summary,
+  [role="button"] {
+    cursor: pointer;
+  }
+  input,
+  textarea {
+    font: inherit;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
