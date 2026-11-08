@@ -31,9 +31,18 @@ export async function api(path: string, body?: Json) {
       : { cache: "no-store" },
   );
   const data = await res.json();
+  if (res.status === 401) {
+    window.location.assign("/?login=1");
+    throw new Error("登录已过期，请重新登录");
+  }
   if (!res.ok) throw new Error(data.error || "请求失败");
   return data;
 }
+import type {
+  StudioRoute,
+  StudioView,
+  NavigationParams,
+} from "@/lib/studio-routes";
 type Confirmation = {
   title: string;
   description: string;
@@ -41,6 +50,7 @@ type Confirmation = {
   action: () => void | Promise<void>;
 };
 type Context = {
+  route: StudioRoute;
   project: Project | null;
   episode: Episode | undefined;
   run: Run | undefined;
@@ -49,7 +59,11 @@ type Context = {
   profiles: Json;
   refresh: () => Promise<void>;
   mutate: (action: string, body?: Json) => Promise<Json>;
-  navigate: (view: string, params?: Json) => void;
+  navigate: (
+    view: StudioView,
+    params?: NavigationParams,
+    options?: { saved?: boolean },
+  ) => void;
   dirty: boolean;
   setDirty: (dirty: boolean) => void;
   confirm: (value: Confirmation) => void;

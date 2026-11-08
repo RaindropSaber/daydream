@@ -46,6 +46,10 @@ export async function assistForm(body: Json) {
   );
   if (body.mode === "prompt" || body.mode === "chat") return assistPrompt(body);
   assert(
+    body.skill !== "story",
+    "故事创作已独立，请进入故事创作工作区；视频内仅选择章节",
+  );
+  assert(
     typeof body.skill === "string" &&
       Object.hasOwn(CREATION_SKILLS, body.skill),
     "未知创作模块",
@@ -87,6 +91,7 @@ export async function assistForm(body: Json) {
   const tool = CREATION_SKILLS[skill].tool;
   let patch: Json | null = null;
   const result = await runCreationAgent({
+    role: "text",
     instructions:
       `已加载 skill：${skill}\n来源：skills/creation/${skill}/SKILL.md\n` +
       (await skillInstructions(skill)) +
@@ -97,7 +102,14 @@ export async function assistForm(body: Json) {
       skill,
       current_form: body.form,
       local_context: body.local_context || {},
-      project: p ? { title: p.title, creative_prompt: projectPrompt(p) } : null,
+      project: p
+        ? {
+            title: p.title,
+            brief: p.brief,
+            production: p.production,
+            production_prompt: projectPrompt(p),
+          }
+        : null,
       episode: p?.episodes.find((e) => e.id === body.episode_id)?.brief,
       target_duration:
         p?.episodes.find((e) => e.id === body.episode_id)?.target_duration ??

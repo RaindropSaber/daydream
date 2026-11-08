@@ -6,22 +6,22 @@ import { mentionInstructions } from "../src/lib/server/creation-agent";
 test("skill mentions load only registered skills and preserve editing boundaries", async () => {
   assert.deepEqual(
     mentionedSkills(
-      "使用 @skill:story 和 @skill:story、@stage:director @skill:unknown",
+      "使用 @skill:director 和 @skill:director、@stage:story @skill:unknown",
     ),
-    ["story"],
+    ["director"],
   );
   const result = await mentionInstructions(
     [{ text: "使用 @skill:director 参考 @stage:story" }],
-    "story",
+    "episode",
   );
-  assert.deepEqual(result.skills, ["story", "director"]);
+  assert.deepEqual(result.skills, ["episode", "director"]);
   assert.match(result.instructions, /name: director/);
   assert.match(result.instructions, /不扩大写入权限/);
   await assert.rejects(
     () =>
       mentionInstructions([
         {
-          text: "@skill:project @skill:episode @skill:run @skill:story @skill:director",
+          text: "@skill:project @skill:episode @skill:run @skill:asset @skill:director",
         },
       ]),
     /最多引用四个/,

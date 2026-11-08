@@ -1,3 +1,5 @@
+import { assetUsages } from "../src/lib/asset-library";
+import { createStory, saveStory, loadStory } from "../src/lib/server/stories";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -81,17 +83,54 @@ test("episode target duration persists and rejects invalid seconds", async () =>
   assert.equal(saved.episodes.length, 2);
 });
 
+async function storyFixture(projectId: string, text = "完整故事") {
+  let story = await loadStory(projectId).catch(() => null);
+  if (!story) ({ story } = await createStory(projectId, { title: "测试故事" }));
+  ({ story } = await saveStory(projectId, {
+    expected_revision: story.revision,
+    content: {
+      ...story,
+      chapters: [
+        {
+          id: "chapter-1",
+          title: "第一章",
+          summary: "本章提要",
+          text,
+          status: "draft",
+        },
+      ],
+    },
+    confirm_chapter_id: "chapter-1",
+  }));
+  return {
+    story_id: story.id,
+    story_revision: story.revision,
+    chapter_ids: ["chapter-1"],
+  };
+}
+async function selectFixture(
+  f: {
+    op: (action: string, b?: Json) => Promise<any>;
+    read: () => Promise<any>;
+  },
+  text: string,
+) {
+  const { p, r } = await f.read();
+  return f.op("select-story", {
+    ...(await storyFixture(p.id, text)),
+    expected_selected: r.steps.story.selected,
+  });
+}
+
 async function setup() {
   const { project: p } = await createProject({ title: "Node test" });
   const ids = await mutate(p.id, "episodes", { title: "第1集" });
   const op = (action: string, b: Json = {}) =>
     mutate(p.id, action, { ...ids, ...b });
-  await op("save-step", {
-    step: "story",
-    content: { text: "完整故事" },
-    adopt: true,
+  await op("select-story", {
+    ...(await storyFixture(p.id)),
+    expected_selected: null,
   });
-  await op("approve-step", { step: "story" });
   await op("save-step", {
     step: "director",
     adopt: true,
@@ -227,7 +266,24 @@ test("model roles and service connections save independently, route calls, and a
     assert.equal(saved.api_key, "test-only-key");
     assert.equal(saved.llm_api_key, "compatible-test-key");
     assert.equal(saved.image_model, "doubao-seedream-5-0-flash-260915");
+    await storeConfig({
+      ...saved,
+      storyboard_model: "unused-storyboard-model",
+      storyboard_provider: "wan",
+      resource_model: "unused-resource-model",
+      resource_provider: "wan",
+    });
+    const resolved = await config();
     const visible = await publicConfig();
+    for (const field of [
+      "storyboard_model",
+      "storyboard_provider",
+      "resource_model",
+      "resource_provider",
+    ]) {
+      assert.equal(Object.hasOwn(resolved, field), false);
+      assert.equal(Object.hasOwn(visible, field), false);
+    }
     assert(
       visible.text_configured &&
         visible.agent_configured &&
@@ -269,15 +325,15 @@ test("model roles and service connections save independently, route calls, and a
             message: {
               content: JSON.stringify({
                 reply: "已整理",
-                target_step: "story",
-                proposal: { text: "候选文案" },
+                target_step: "director",
+                proposal: selected((await f.read()).r, "director")!.content,
               }),
             },
           },
         ],
       });
     };
-    const copyJob = await f.op("generate-text", { step: "story" });
+    const copyJob = await f.op("generate-text", { step: "director" });
     await executeJob(await loadJob(copyJob.job_id));
     const assistantJob = await f.op("chat", {
       step: "assistant",
@@ -393,17 +449,29 @@ test("connection tests use unsaved or stored credentials without saving, generat
 test("SQLite stores relational entities, serializes concurrent edits and supports copied version IDs", async () => {
   const f = await setup();
   await Promise.all([
-    f.op("save-step", { step: "story", content: { text: "候选A" } }),
-    f.op("save-step", { step: "story", content: { text: "候选B" } }),
+    f.op("save-step", {
+      step: "director",
+      content: {
+        ...selected((await f.read()).r, "director")!.content,
+        prompt: "候选A",
+      },
+    }),
+    f.op("save-step", {
+      step: "director",
+      content: {
+        ...selected((await f.read()).r, "director")!.content,
+        prompt: "候选B",
+      },
+    }),
   ]);
   const { r } = await f.read();
-  assert.equal(r.steps.story.versions.length, 3);
-  assert.equal(new Set(r.steps.story.versions.map((v) => v.number)).size, 3);
+  assert.equal(r.steps.director.versions.length, 3);
+  assert.equal(new Set(r.steps.director.versions.map((v) => v.number)).size, 3);
   const fork = await f.op("runs", { inherit: "all", name: "另一方案" });
   const p = await loadProject(f.pid);
   const copied = locate(p, f.ids.episode_id, fork.run_id).r;
-  assert.equal(copied.steps.story.selected, r.steps.story.selected);
-  assert.equal(copied.steps.story.versions.length, 3);
+  assert.equal(copied.steps.director.selected, r.steps.director.selected);
+  assert.equal(copied.steps.director.versions.length, 3);
   assert.equal(
     (
       await database().query(
@@ -425,71 +493,68 @@ test("SQLite stores relational entities, serializes concurrent edits and support
 });
 test("discussion does not create a version and late proposals do not override a newer selection", async () => {
   const f = await setup();
-  const discussion = await f.op("chat", { step: "story", message: "讨论方向" });
+  const content = selected((await f.read()).r, "director")!.content;
+  const discussion = await f.op("chat", {
+    step: "director",
+    message: "讨论方向",
+  });
   mockText({ reply: "讨论建议", proposal: null });
   await executeJob(await loadJob(discussion.job_id));
-  assert.equal((await f.read()).r.steps.story.versions.length, 1);
-  const draft = await f.op("chat", { step: "story", message: "整理新稿" });
+  assert.equal((await f.read()).r.steps.director.versions.length, 1);
+  const draft = await f.op("chat", { step: "director", message: "整理新稿" });
   const edited = await f.op("save-step", {
-    step: "story",
-    content: { text: "用户的新版本" },
+    step: "director",
+    content: { ...content, prompt: "用户的新版本" },
     adopt: true,
   });
-  mockText({ reply: "草稿已整理", proposal: { text: "AI候选" } });
+  mockText({ reply: "草稿已整理", proposal: { ...content, prompt: "AI候选" } });
   await executeJob(await loadJob(draft.job_id));
   const { r } = await f.read();
-  assert.equal(r.steps.story.selected, edited.version_id);
-  assert.equal(r.steps.story.versions.at(-1)!.content.text, "AI候选");
-  assert.equal(r.conversations.story.length, 4);
+  assert.equal(r.steps.director.selected, edited.version_id);
+  assert.equal(r.steps.director.versions.at(-1)!.content.prompt, "AI候选");
+  assert.equal(r.conversations.director.length, 4);
   globalThis.fetch = originalFetch;
 });
-test("shared assistant reads legacy stages and routes drafts independently of the visible page", async () => {
+
+test("shared video assistant reads selected story sources and routes only production drafts", async () => {
   const f = await setup();
-  for (const step of ["story", "characters"]) {
-    const queued = await f.op("chat", { step, message: `${step}历史讨论` });
-    mockText({ reply: `${step}历史回复`, proposal: null });
-    await executeJob(await loadJob(queued.job_id));
-  }
+  const before = (await f.read()).r;
   const queued = await f.op("chat", {
     step: "assistant",
     page_context: "characters",
-    message: "根据之前的讨论修改故事",
+    message: "根据故事修改分镜",
   });
   let context: Json = {};
   globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(String(init?.body));
     context = JSON.parse(body.messages[1].content);
-    assert.match(body.messages[0].content, /target_step/);
+    assert(!context.available_draft_targets.includes("story"));
+    assert(!Object.hasOwn(context.output_shape, "story"));
     return toolReply(
       {
-        reply: "故事草稿已整理",
-        target_step: "story",
-        proposal: { text: "跨阶段故事候选" },
+        reply: "分镜草稿已整理",
+        target_step: "director",
+        proposal: {
+          ...selected(before, "director")!.content,
+          prompt: "改编分镜候选",
+        },
       },
       body,
     );
   };
-  const original = (await f.read()).r.steps.story.selected;
   await executeJob(await loadJob(queued.job_id));
-  assert.equal(context.current_page, "characters");
-  assert.deepEqual(
-    context.conversation.map((m: Json) => m.stage),
-    ["story", "story", "characters", "characters", "assistant"],
-  );
-  assert.equal(context.stages.characters.adopted_version.world.premise, "测试");
-  assert.equal(context.output_shape.story.text, "完整故事正文");
   const { r } = await f.read();
-  assert.equal(r.steps.story.selected, original);
-  assert.equal(r.steps.story.versions.at(-1)!.content.text, "跨阶段故事候选");
-  assert.equal(r.steps.characters.versions.length, 1);
-  assert.equal(r.conversations.assistant.at(-1)!.target_step, "story");
-  assert.equal((await loadJob(queued.job_id)).result_step, "story");
-  const timeline = conversationTimeline(r);
-  assert.equal(timeline.length, 6);
-  assert.equal(timeline.at(-1)!.version_id, r.steps.story.versions.at(-1)!.id);
-  assert(timeline.every((m, i) => !i || timeline[i - 1].created <= m.created));
+  assert.equal(context.current_page, "characters");
+  assert(context.approved_story.source.story_id);
+  assert.deepEqual(r.steps.story, before.steps.story);
+  assert.equal(r.steps.director.selected, before.steps.director.selected);
+  assert.equal(
+    r.steps.director.versions.at(-1)!.content.prompt,
+    "改编分镜候选",
+  );
   globalThis.fetch = originalFetch;
 });
+
 test("shared discussion works before approvals but proposals still enforce prerequisites and valid destinations", async () => {
   const { project: p } = await createProject({ title: "空白创作" });
   const ids = await mutate(p.id, "episodes", { title: "新分集" });
@@ -670,7 +735,7 @@ test("full Node workflow creates candidates, explicitly adopts them and exports 
 });
 test("API projections exclude credentials and private task snapshots", async () => {
   const f = await setup();
-  const j = await f.op("chat", { step: "story", message: "讨论" });
+  const j = await f.op("chat", { step: "director", message: "讨论" });
   const jobs = await listJobs(f.pid);
   assert.equal(jobs[0].snapshot, undefined);
   assert.equal(jobs[0].payload, undefined);
@@ -732,7 +797,10 @@ test("worker recovers interruptions, has a single lease and completes a queued j
     "UPDATE jobs SET state='failed' WHERE state IN ('queued','running')",
   );
   const f = await setup();
-  const interrupted = await f.op("chat", { step: "story", message: "旧任务" });
+  const interrupted = await f.op("chat", {
+    step: "director",
+    message: "旧任务",
+  });
   const j = await loadJob(interrupted.job_id);
   j.state = "running";
   await saveJob(j);
@@ -754,7 +822,7 @@ test("worker recovers interruptions, has a single lease and completes a queued j
   const stopOther = await startWorker();
   try {
     assert.equal((await loadJob(j.id)).state, "failed");
-    const queued = await f.op("chat", { step: "story", message: "新任务" });
+    const queued = await f.op("chat", { step: "director", message: "新任务" });
     const deadline = Date.now() + 5000;
     while (
       (await loadJob(queued.job_id)).state !== "done" &&
@@ -770,7 +838,7 @@ test("worker recovers interruptions, has a single lease and completes a queued j
   }
 });
 
-test("partial image results survive failure and uncertain poses cannot be silently resubmitted", async () => {
+test("an uncertain single image submission cannot be silently resubmitted", async () => {
   const f = await setup();
   await f.op("save-step", {
     step: "characters",
@@ -795,109 +863,26 @@ test("partial image results survive failure and uncertain poses cannot be silent
   const j = (await listJobs(f.pid, database(), true))[0];
   let submitted = 0;
   globalThis.fetch = async () => {
-    if (++submitted === 2) throw Error("simulated image timeout");
-    return Response.json({
-      data: [
-        { b64_json: Buffer.from([255, 216, 255, 217]).toString("base64") },
-      ],
-    });
+    submitted++;
+    throw Error("simulated image timeout");
   };
   await assert.rejects(executeJob(j));
   const partial = await loadJob(j.id);
   partial.state = "failed";
   await saveJob(partial);
-  assert.equal(partial.images.length, 1);
-  assert.deepEqual(partial.attempted_poses, ["portrait", "fullbody"]);
+  assert.equal(partial.images.length, 0);
+  assert.deepEqual(partial.attempted_poses, ["character-sheet"]);
   await assert.rejects(
     f.op("character-image", { asset_id: "hero", resume_job_id: j.id }),
   );
-  assert.equal(submitted, 2);
+  await assert.rejects(executeJob(await loadJob(j.id)), /结果不确定/);
+  assert.equal(submitted, 1);
   assert.equal(
     (await f.read()).r.steps.characters.versions.at(-1)!.content.characters[0]
       .images.length,
     0,
   );
   globalThis.fetch = originalFetch;
-});
-
-test("project assistant uses a scoped skill/tool before a project exists; drafts persist only on save", async () => {
-  const { assistForm } = await import("../src/lib/server/form-assistant");
-  const { projectPrompt } = await import("../src/lib/creative-spec");
-  const { videoPayload } = await import("../src/lib/server/providers");
-  const before = Number(
-    (await database().query("SELECT count(*) AS n FROM projects")).rows[0].n,
-  );
-  const sent: Json[] = [];
-  globalThis.fetch = async (_url, init) => {
-    const body = JSON.parse(String(init?.body));
-    sent.push(body);
-    return formToolReply(body, {
-      title: "未来武侠",
-      creative_prompt: "冷色电影光线，未来功能材质，东方建筑形制。",
-    });
-  };
-  try {
-    const form = {
-      title: "",
-      brief: "未来武侠",
-      style: "电影写实",
-      ratio: "16:9",
-      creative_prompt: "",
-    };
-    const result = await assistForm({
-      skill: "project",
-      form,
-      messages: [
-        {
-          role: "user",
-          text: "使用 project skill，帮我完善项目构思并回填表单",
-        },
-      ],
-    });
-    assert.equal(result.tool, "update_project_form");
-    assert(result.patch);
-    assert.equal(sent[0].response_format, undefined);
-    assert.match(sent[0].messages[0].content, /name: project/);
-    assert.equal(sent[0].tools.length, 5);
-    assert.equal(sent[0].tools[0].function.name, "update_project_form");
-    assert.equal(sent[1].messages.at(-1).role, "tool");
-    assert.equal(result.prompt_trace.skill, "project");
-    assert.equal(
-      result.prompt_trace.skill_file,
-      "skills/creation/project/SKILL.md",
-    );
-    assert.equal(result.prompt_trace.available_tool, "update_project_form");
-    assert.deepEqual(result.prompt_trace.requests, sent);
-    const traceText = JSON.stringify(result.prompt_trace);
-    for (const [key, secret] of Object.entries(await config())) {
-      if (key.endsWith("api_key") && typeof secret === "string" && secret)
-        assert(!traceText.includes(secret));
-    }
-
-    assert.equal(
-      Number(
-        (await database().query("SELECT count(*) AS n FROM projects")).rows[0]
-          .n,
-      ),
-      before,
-    );
-    const { project: created } = await createProject({
-      ...form,
-      ...result.patch,
-    });
-    const loaded = await loadProject(created.id);
-    assert.match(projectPrompt(loaded), /未来功能材质/);
-    const workflow = await setup();
-    const { p, r } = await workflow.read();
-    p.creative_prompt = loaded.creative_prompt;
-    const segment = selected(r, "director")!.content.segments[0];
-    assert.match(
-      JSON.stringify((await videoPayload(p, r, segment)).payload),
-      /未来功能材质/,
-    );
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
 });
 
 function formToolReply(body: Json, patch: Json, name?: string) {
@@ -907,7 +892,7 @@ function formToolReply(body: Json, patch: Json, name?: string) {
         finish_reason: body.tool_choice === "none" ? "stop" : "tool_calls",
         message:
           body.tool_choice === "none"
-            ? { content: "已回填当前草稿，请检查后保存。" }
+            ? { content: "已整理候选稿，请检查后应用。" }
             : {
                 content: null,
                 tool_calls: [
@@ -926,64 +911,206 @@ function formToolReply(body: Json, patch: Json, name?: string) {
   });
 }
 
-test("existing project basics can be generated as a card and feed all creative requests", async () => {
+test("project assistant creates only name and description cards and does not save them", async () => {
   const { assistForm } = await import("../src/lib/server/form-assistant");
-  const { saveProject } = await import("../src/lib/server/repository");
+  const count = (await database().query("SELECT count(*) AS n FROM projects"))
+    .rows[0].n;
+  const sent: Json[] = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    sent.push(body);
+    return formToolReply(body, {
+      title: "未来武侠",
+      brief: "一部以未来江湖为背景的作品。",
+    });
+  };
+  try {
+    const result = await assistForm({
+      skill: "project",
+      form: { title: "", brief: "未来武侠" },
+      messages: [{ role: "user", text: "完善项目名称和简介" }],
+    });
+    assert.equal(result.tool, "update_project_form");
+    assert.deepEqual(
+      Object.keys(sent[0].tools[0].function.parameters.properties),
+      ["title", "brief"],
+    );
+    assert.equal(
+      (await database().query("SELECT count(*) AS n FROM projects")).rows[0].n,
+      count,
+    );
+    const { project: created } = await createProject(result.patch!);
+    const loaded = await loadProject(created.id);
+    assert.equal(loaded.brief, result.patch!.brief);
+    assert.deepEqual(loaded.production, {
+      style: "电影写实",
+      ratio: "16:9",
+      prompt: "",
+      adaptation: "",
+      revision: 0,
+    });
+    assert.equal(Object.hasOwn(loaded, "style"), false);
+    assert.equal(Object.hasOwn(loaded, "creative_prompt"), false);
+    globalThis.fetch = async (_url, init) =>
+      formToolReply(JSON.parse(String(init?.body)), { style: "不应混入项目" });
+    await assert.rejects(
+      assistForm({
+        skill: "project",
+        form: {},
+        messages: [{ role: "user", text: "完善" }],
+      }),
+      /未授权字段/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("project-level production cards recover from missing episode reads without saving", async () => {
+  const { assistForm } = await import("../src/lib/server/form-assistant");
+  const { project: p } = await createProject({ title: "无需分集的制作设置" });
+  const frozen = digest(await loadProject(p.id));
+  const patch = {
+    prompt: "柔和侧光与低饱和色彩",
+    adaptation: "以人物视角叙事",
+  };
+  try {
+    for (const mode of ["prompt", "form"]) {
+      let calls = 0;
+      globalThis.fetch = async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        calls++;
+        if (calls === 1) return formToolReply(body, {}, "get_workflow_status");
+        if (calls === 2) {
+          const failed = JSON.parse(body.messages.at(-1).content);
+          assert.equal(failed.executed, false);
+          assert.match(failed.error, /请指定要读取的分集/);
+          return formToolReply(body, {}, "get_project_context");
+        }
+        if (calls === 3) {
+          const context = JSON.parse(body.messages.at(-1).content);
+          assert.deepEqual(context.episodes, []);
+          assert.deepEqual(context.production, p.production);
+          return formToolReply(body, patch, "update_production_form");
+        }
+        return formToolReply(body, {});
+      };
+      const result = await assistForm({
+        ...(mode === "prompt"
+          ? {
+              mode,
+              context_scope: { project_id: p.id },
+              form_source: { skill: "production", form: p.production },
+            }
+          : { project_id: p.id, skill: "production", form: p.production }),
+        messages: [
+          { role: "user", text: "使用 @skill:production，完善制作设置" },
+        ],
+      });
+      assert.equal(calls, 4);
+      assert.deepEqual(result.patch, patch);
+      assert.equal(result.tool, "update_production_form");
+      assert.equal(digest(await loadProject(p.id)), frozen);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("failed creation reads consume the budget and unexpected errors still propagate", async () => {
+  const { runCreationAgent } = await import("../src/lib/server/creation-agent");
+  const { AppError } = await import("../src/lib/domain");
+  let reads = 0;
+  let failure: Error = new AppError("缺少分集");
+  const request = {
+    instructions: "生成卡片",
+    context: {},
+    messages: [{ role: "user", text: "生成" }],
+    maxReads: 1,
+    tools: [
+      {
+        name: "read",
+        readOnly: true,
+        description: "读取",
+        parameters: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+        execute() {
+          reads++;
+          throw failure;
+        },
+      },
+    ],
+  };
+  try {
+    globalThis.fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.tool_choice === "none") {
+        assert.equal(JSON.parse(body.messages.at(-1).content).executed, false);
+        return formToolReply(body, {});
+      }
+      return formToolReply(body, {}, "read");
+    };
+    await runCreationAgent(request);
+    assert.equal(reads, 1);
+    for (failure of [
+      new Error("database unavailable"),
+      new AppError("forbidden", 403),
+    ]) {
+      await assert.rejects(
+        runCreationAgent(request),
+        (error) => error === failure,
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("production cards feed video, storyboard and image requests without editing project descriptions", async () => {
+  const { assistForm } = await import("../src/lib/server/form-assistant");
   const { projectPrompt } = await import("../src/lib/creative-spec");
   const { videoPayload } = await import("../src/lib/server/providers");
   const f = await setup();
   let { p, r } = await f.read();
-  const form = {
-    title: p.title,
-    brief: p.brief,
-    style: p.style,
-    ratio: p.ratio,
-    creative_prompt: p.creative_prompt || "",
-    base_updated: p.updated,
-  };
   const patch = {
-    brief: "群岛上的邮差寻找失落航线",
     style: "水彩插画",
     ratio: "9:16",
-    creative_prompt: "手绘纸张纹理，暖橙色夕光，避免金属赛博元素。",
+    prompt: "暖橙色夕光与手绘纸张纹理",
+    adaptation: "保留来信情节，以人物视角展开",
   };
+  const frozen = digest(p);
+  globalThis.fetch = async (_url, init) =>
+    formToolReply(JSON.parse(String(init?.body)), patch);
   try {
-    const frozen = digest(p);
-    globalThis.fetch = async (_url, init) => {
-      const body = JSON.parse(String(init?.body));
-      const context = JSON.parse(body.messages[1].content);
-      assert.equal(context.project.title, p.title);
-      assert.equal(context.current_form.base_updated, p.updated);
-      assert.match(
-        body.messages[0].content,
-        /项目基础信息是所有创作的共同依据/,
-      );
-      return formToolReply(body, patch);
-    };
     const result = await assistForm({
       project_id: p.id,
-      skill: "project",
-      form,
-      messages: [{ role: "user", text: "完善基础信息，包括方向、风格和画幅" }],
+      skill: "production",
+      form: p.production,
+      messages: [{ role: "user", text: "完善制作设置" }],
     });
     assert.deepEqual(result.patch, patch);
     assert.equal(digest(await loadProject(p.id)), frozen);
-    await mutate(p.id, "project-settings", { ...form, ...result.patch });
-    p = await loadProject(p.id);
-    for (const [key, value] of Object.entries(patch))
-      assert.equal(p[key], value);
-
-    // Use a fresh fixture with these basics to exercise every form's prerequisites.
+    await mutate(p.id, "production-settings", {
+      ...patch,
+      base_revision: p.production.revision,
+    });
+    const saved = await loadProject(p.id);
+    assert.equal(saved.title, p.title);
+    assert.equal(saved.brief, p.brief);
+    // Fresh ready stages use the saved settings in every downstream request.
     const ready = await setup();
     ({ p, r } = await ready.read());
-    Object.assign(p, patch);
+    const { saveProject } = await import("../src/lib/server/repository");
+    p.production = { ...patch, revision: 0 };
     await saveProject(p);
     const expected = projectPrompt(p);
     for (const skill of [
       "episode",
       "run",
       "asset",
-      "story",
       "director",
       "settings",
       "beat",
@@ -995,12 +1122,12 @@ test("existing project basics can be generated as a card and feed all creative r
       globalThis.fetch = async (_url, init) => {
         const body = JSON.parse(String(init?.body));
         assert.equal(
-          JSON.parse(body.messages[1].content).project.creative_prompt,
+          JSON.parse(body.messages[1].content).project.production_prompt,
           expected,
         );
         return Response.json({
           choices: [
-            { finish_reason: "stop", message: { content: "讨论创作要求" } },
+            { finish_reason: "stop", message: { content: "讨论制作要求" } },
           ],
         });
       };
@@ -1009,13 +1136,14 @@ test("existing project basics can be generated as a card and feed all creative r
         ...ready.ids,
         skill,
         form: {},
-        messages: [{ role: "user", text: "讨论当前项目要求" }],
+        messages: [{ role: "user", text: "讨论当前制作要求" }],
       });
     }
-    const segment = selected(r, "director")!.content.segments[0];
-    const payload = JSON.stringify((await videoPayload(p, r, segment)).payload);
+    const payload = JSON.stringify(
+      (await videoPayload(p, r, selected(r, "director")!.content.segments[0]))
+        .payload,
+    );
     for (const value of Object.values(patch)) assert(payload.includes(value));
-
     const { asset_id } = await mutate(p.id, "asset", {
       kind: "prop",
       name: "信封",
@@ -1091,7 +1219,7 @@ test("creation form cards remain available when the selected source scheme has e
         form: { text: "原文" },
         messages: [{ role: "user", text: "改写已结束方案" }],
       }),
-      /此方案已结束/,
+      /故事创作已独立/,
     );
     assert(calls > 0);
     assert.equal(digest(await loadProject(p.id)), frozen);
@@ -1100,59 +1228,48 @@ test("creation form cards remain available when the selected source scheme has e
   }
 });
 
-test("creation agent reads workflow and upstream content before preparing a form card", async () => {
+test("creation agent reads workflow and selected chapters before preparing a director card", async () => {
   const { assistForm } = await import("../src/lib/server/form-assistant");
   const f = await setup();
-  const { p, r } = await f.read();
+  const { r } = await f.read();
   let calls = 0;
-  const sent: Json[] = [];
   globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(String(init?.body));
-    sent.push(body);
     calls++;
     if (calls === 1) return formToolReply(body, {}, "get_workflow_status");
     if (calls === 2) {
-      const state = JSON.parse(body.messages.at(-1).content);
-      assert.equal(state.stages.story.status, "approved");
       assert.equal(
-        state.stages.story.selected_version_id,
-        selected(r, "story")!.id,
+        JSON.parse(body.messages.at(-1).content).stages.story.status,
+        "approved",
       );
       return formToolReply(body, { stage: "story" }, "get_stage_content");
     }
     if (calls === 3) {
-      const story = JSON.parse(body.messages.at(-1).content);
-      assert.equal(story.approved_version.content.text, "完整故事");
-      assert.equal(story.status, "approved");
+      assert(
+        JSON.parse(body.messages.at(-1).content).approved_version.content.source
+          .story_id,
+      );
       return formToolReply(
         body,
-        { text: "根据现有故事完善的新正文" },
-        "update_story_form",
+        { prompt: "根据选章改编的分镜" },
+        "update_director_form",
       );
     }
-    assert.equal(body.tool_choice, "none");
     return formToolReply(body, {});
   };
   try {
     const result = await assistForm({
-      skill: "story",
-      project_id: p.id,
+      skill: "director",
+      project_id: f.pid,
       ...f.ids,
-      form: { text: "尚未保存的故事编辑" },
-      messages: [{ role: "user", text: "根据已有内容完善故事" }],
+      form: selected(r, "director")!.content,
+      messages: [{ role: "user", text: "根据已有章节改编" }],
     });
     assert.equal(calls, 4);
-    assert.equal(result.tool, "update_story_form");
-    assert.equal(result.patch!.text, "根据现有故事完善的新正文");
-    assert.match(sent[0].messages[0].content, /get_workflow_status/);
+    assert.equal(result.patch!.prompt, "根据选章改编的分镜");
     assert.equal(
-      JSON.parse(sent[0].messages[1].content).current_form.text,
-      "尚未保存的故事编辑",
-    );
-    assert.deepEqual(result.prompt_trace.requests, sent);
-    assert.equal(
-      selected((await f.read()).r, "story")!.content.text,
-      "完整故事",
+      selected((await f.read()).r, "director")!.content.prompt,
+      "统一意图",
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -1261,9 +1378,13 @@ test("prompt conversations use sent skills without loading hidden page context",
     const body = JSON.parse(String(init?.body));
     sent.push(body);
     return body.tools?.some(
-      (tool: Json) => tool.function.name === "update_story_form",
+      (tool: Json) => tool.function.name === "update_episode_form",
     ) && body.tool_choice !== "none"
-      ? formToolReply(body, { text: "按提示词创作的故事" }, "update_story_form")
+      ? formToolReply(
+          body,
+          { title: "旅行", brief: "太空旅行" },
+          "update_episode_form",
+        )
       : Response.json({
           choices: [
             { finish_reason: "stop", message: { content: "聊聊吧。" } },
@@ -1296,16 +1417,16 @@ test("prompt conversations use sent skills without loading hidden page context",
     const story = await assistForm({
       ...hidden,
       mode: "prompt",
-      messages: [{ role: "user", text: "使用 @skill:story，写太空旅行故事" }],
+      messages: [{ role: "user", text: "使用 @skill:episode，写太空旅行故事" }],
     });
-    assert.equal(story.skill, "story");
-    assert.deepEqual(story.patch, { text: "按提示词创作的故事" });
-    assert.deepEqual(story.prompt_trace.loaded_skills, ["story"]);
+    assert.equal(story.skill, "episode");
+    assert.deepEqual(story.patch, { title: "旅行", brief: "太空旅行" });
+    assert.deepEqual(story.prompt_trace.loaded_skills, ["episode"]);
     assert.deepEqual(
       sent[1].tools
         .filter((tool: Json) => tool.function.name.startsWith("update_"))
         .map((tool: Json) => tool.function.name),
-      ["update_story_form"],
+      ["update_episode_form"],
     );
     assert(!JSON.stringify(sent).includes("隐藏剧情，不应发送"));
     assert(!JSON.stringify(sent).includes("隐藏上下文，不应发送"));
@@ -1354,7 +1475,7 @@ test("episode generation reads drafts and previous episodes without asking for a
     }
     if (requests.length === 4) {
       const story = JSON.parse(body.messages.at(-1).content);
-      assert.equal(story.approved_version.content.text, "完整故事");
+      assert.equal(story.approved_version.content.text, "第一章\n\n完整故事");
       return formToolReply(
         body,
         { title: "第二集：追踪", brief: "承接前集的追踪行动" },
@@ -1478,7 +1599,7 @@ test("prompt conversations can read explicitly referenced stages without injecti
     if (requests.length === 1)
       return formToolReply(body, { stage: "story" }, "get_stage_content");
     const stage = JSON.parse(body.messages.at(-1).content);
-    assert.equal(stage.approved_version.content.text, "完整故事");
+    assert.equal(stage.approved_version.content.text, "第一章\n\n完整故事");
     return Response.json({
       choices: [
         { finish_reason: "stop", message: { content: "已查阅引用的故事。" } },
@@ -1516,9 +1637,9 @@ test("context tools distinguish stale selections from approved content and enfor
   });
   const stage = tools.find((t) => t.name === "get_stage_content")!;
   r.project_config_revision = 99;
-  const stale = (await stage.execute({ stage: "story" })) as Json;
+  const stale = (await stage.execute({ stage: "director" })) as Json;
   assert.equal(stale.status, "stale");
-  assert.equal(stale.selected_version.content.text, "完整故事");
+  assert.equal(stale.selected_version.content.prompt, "统一意图");
   assert.equal(stale.approved_version, null);
   await assert.rejects(
     () =>
@@ -1573,14 +1694,17 @@ test("form assistant discussions do not write; wrong tools, unexpected fields an
     await assert.rejects(() => assistForm(request), /未授权字段/);
     globalThis.fetch = async (_url, init) =>
       formToolReply(JSON.parse(String(init?.body)), { ratio: "4:3" });
-    await assert.rejects(() => assistForm(request), /不支持此值/);
+    await assert.rejects(
+      () => assistForm({ ...request, skill: "production" }),
+      /不支持此值/,
+    );
     await assert.rejects(
       () => assistForm({ ...request, skill: "../../secret" }),
       /未知创作模块/,
     );
     await assert.rejects(
       () => assistForm({ ...request, skill: "story" }),
-      /先选择/,
+      /故事创作已独立/,
     );
     globalThis.fetch = async () =>
       Response.json({
@@ -1624,7 +1748,7 @@ test("stage form tools validate plans and settings without changing adopted vers
           skill: "director",
           form: selected(r, "director")!.content,
         }),
-      /时间节拍/,
+      /分镜时间表/,
     );
     globalThis.fetch = async (_url, init) =>
       formToolReply(JSON.parse(String(init?.body)), {
@@ -1731,7 +1855,7 @@ test("editing tool only accepts available fresh clips and valid trim ranges", as
   }
 });
 
-test("Qwen image jobs use only Bailian credentials and reuse generated PNGs for the next pose", async () => {
+test("Qwen generates one character sheet and can reuse its PNG for regeneration", async () => {
   const savedConfig = await config();
   const arkEnvironment = process.env.ARK_API_KEY;
   try {
@@ -1789,6 +1913,8 @@ test("Qwen image jobs use only Bailian credentials and reuse generated PNGs for 
       const body = JSON.parse(String(options?.body));
       assert.equal(body.model, "qwen-image-2.1-pro");
       const content = body.input.messages[0].content;
+      assert.equal(body.parameters.n, 1);
+      assert.match(content.at(-1).text, /2×2四区布局/);
       if (submitted++ === 0) assert.equal(content.length, 1);
       else
         assert.equal(
@@ -1811,12 +1937,35 @@ test("Qwen image jobs use only Bailian credentials and reuse generated PNGs for 
     const job = (await listJobs(f.pid, database(), true))[0];
     assert.equal(job.key_fingerprint, digest("qwen-test-key"));
     await executeJob(job);
-    assert.equal(submitted, 2);
+    assert.equal(submitted, 1);
     const result = await f.read();
     const asset = result.p.assets.find((a) => a.id === "hero")!;
     const generated = asset.versions.at(-1)!;
     assert.equal(generated.source, "qwen-image");
-    assert.equal(generated.images.length, 2);
+    assert.equal(generated.images.length, 1);
+    assert.equal(generated.images[0].pose, "character-sheet");
+    assert.equal(
+      selected(result.r, "characters")!.content.characters[0].images.length,
+      0,
+    );
+    await f.op("asset-adopt", {
+      asset_id: "hero",
+      version_id: generated.id,
+      expected_adopted: null,
+    });
+    await f.op("asset-update-references", {
+      asset_id: "hero",
+      version_id: generated.id,
+      targets: assetUsages((await f.read()).p, "hero", "default"),
+    });
+    await f.op("character-image", { asset_id: "hero" });
+    const regeneration = (await listJobs(f.pid, database(), true)).find(
+      (candidate) =>
+        candidate.id !== job.id && candidate.kind === "character-image",
+    )!;
+    await executeJob(regeneration);
+    assert.equal(submitted, 2);
+    assert.equal((await loadJob(regeneration.id)).images.length, 1);
     assert(
       generated.images.every((image: Json) => image.file.endsWith(".png")),
     );
@@ -1826,6 +1975,45 @@ test("Qwen image jobs use only Bailian credentials and reuse generated PNGs for 
     else process.env.ARK_API_KEY = arkEnvironment;
     await storeConfig(savedConfig);
   }
+});
+
+test("video references treat a character sheet as one identity reference", async () => {
+  const f = await setup();
+  await f.op("save-step", {
+    step: "characters",
+    adopt: true,
+    content: {
+      world: {},
+      characters: [
+        {
+          asset_id: "hero",
+          version: "hero-v1",
+          kind: "character",
+          name: "机器人",
+          description: "小机器人",
+          segment_ids: ["A"],
+          url: "",
+          images: [
+            { url: "https://example.com/sheet.png", pose: "character-sheet" },
+          ],
+        },
+      ],
+    },
+  });
+  const { p, r } = await f.read();
+  const { videoPayload } = await import("../src/lib/server/providers");
+  const request = await videoPayload(
+    p,
+    r,
+    selected(r, "director")!.content.segments[0],
+  );
+  assert.match(request.payload.content[0].text, /同一个角色.*四视图设定板/);
+  assert.match(request.payload.content[0].text, /不把各视图生成为多个角色/);
+  assert.equal(
+    request.payload.content.filter((item: Json) => item.type === "image_url")
+      .length,
+    1,
+  );
 });
 
 test("ending a scheme requires a current export and idle jobs, locks every write, and allows an editable inherited scheme", async () => {
@@ -1909,8 +2097,8 @@ test("ending a scheme requires a current export and idle jobs, locks every write
     assistForm({
       project_id: p.id,
       ...f.ids,
-      skill: "story",
-      form: { text: "原文" },
+      skill: "director",
+      form: { prompt: "原文" },
       messages: [{ role: "user", text: "改写" }],
     }),
     /此方案已结束/,
@@ -1925,12 +2113,11 @@ test("ending a scheme requires a current export and idle jobs, locks every write
   assert.equal(copy.finished_at, undefined);
   assert.equal(status(p, copy, "complete"), "empty");
   assert.deepEqual(copy.media_selection, ended.media_selection);
-  await mutate(p.id, "save-step", {
+  await mutate(p.id, "select-story", {
     episode_id: f.ids.episode_id,
     run_id: copy.id,
-    step: "story",
-    content: { text: "新方案可以编辑" },
-    adopt: true,
+    ...(await storyFixture(p.id, "新方案可以编辑")),
+    expected_selected: copy.steps.story.selected,
   });
   const original = (await loadProject(p.id)).episodes[0].runs.find(
     (run) => run.id === r.id,
@@ -1943,7 +2130,7 @@ test("ending a scheme requires a current export and idle jobs, locks every write
       )!,
       "story",
     )?.content.text,
-    "新方案可以编辑",
+    "第一章\n\n新方案可以编辑",
   );
 
   // Finishing a replacement transfers only the final node, preserving A's content.
@@ -1965,29 +2152,33 @@ test("ending a scheme requires a current export and idle jobs, locks every write
   const previous = episode.runs.find((run) => run.id === r.id)!;
   assert.equal(status(p, previous, "complete"), "empty");
   const { finished_at: _finished, ...previousContent } = previous;
-  const { finished_at: _originalFinished, ...originalContent } = ended;
+  const {
+    finished_at: _originalFinished,
+    production_snapshot: _originalProductionSnapshot,
+    ...originalContent
+  } = ended;
+  assert.equal(previous.production_snapshot, undefined);
   assert.deepEqual(previousContent, originalContent);
-  await f.op("save-step", {
-    step: "story",
-    content: { text: "原方案重新可编辑" },
-    adopt: true,
-  });
+  await selectFixture(f, "原方案重新可编辑");
 });
 
 test("shared character, scene and prop resources generate versioned images without an episode", async () => {
   const { project: p } = await createProject({ title: "共享资源出图" });
   const png = Buffer.from([255, 216, 255, 217]).toString("base64");
   let submitted = 0;
-  globalThis.fetch = async () => {
+  const prompts: string[] = [];
+  globalThis.fetch = async (_url, init) => {
     submitted++;
+    prompts.push(JSON.parse(String(init?.body)).prompt);
     return Response.json({ data: [{ b64_json: png }] });
   };
   try {
-    for (const [kind, count] of [
-      ["character", 2],
-      ["scene", 2],
-      ["prop", 1],
+    for (const [kind, pose] of [
+      ["character", "character-sheet"],
+      ["scene", "establishing"],
+      ["prop", "object"],
     ] as const) {
+      const count = 1;
       const { asset_id } = await mutate(p.id, "asset", {
         kind,
         name: kind,
@@ -2008,8 +2199,28 @@ test("shared character, scene and prop resources generate versioned images witho
       assert.equal(saved.episodes.length, 0);
       const a = saved.assets.find((a) => a.id === asset_id)!;
       assert.equal(a.versions.length, 2);
-      assert.equal(a.selected, a.versions[1].id);
+      assert.equal(a.selected, a.versions[0].id);
+      await mutate(p.id, "asset-adopt", {
+        asset_id: a.id,
+        version_id: a.versions[1].id,
+        expected_adopted: null,
+      });
       assert.equal(a.versions[1].images.length, count);
+      assert.equal(a.versions[1].images[0].pose, pose);
+      const prompt = prompts.at(-1)!;
+      assert.match(prompt, /只输出一张图片/);
+      if (kind === "character") {
+        for (const view of ["正面全身", "侧面全身", "背面全身", "正面半身特写"])
+          assert(prompt.includes(view));
+        assert.match(prompt, /2×2/);
+        assert(!prompt.includes("不要拼图"));
+      } else if (kind === "scene") {
+        assert.match(prompt, /场景空间全景/);
+        assert.match(prompt, /单一连续画面/);
+        assert.match(prompt, /不生成额外的细节图/);
+      } else {
+        assert.match(prompt, /完整三分之四视角/);
+      }
       assert.equal((await loadJob(job_id)).state, "done");
     }
     const { asset_id } = await mutate(p.id, "asset", {
@@ -2052,55 +2263,88 @@ test("shared character, scene and prop resources generate versioned images witho
   }
 });
 
-test("project settings persist, validate concurrent updates and invalidate only unfinished schemes", async () => {
+test("project descriptions do not invalidate production; production settings validate revisions and invalidate only unfinished schemes", async () => {
   const { saveProject } = await import("../src/lib/server/repository");
   const { status } = await import("../src/lib/domain");
   const f = await setup();
   let { p, r } = await f.read();
-  const form = (project: typeof p) => ({
-    title: project.title,
-    brief: project.brief,
-    style: project.style,
-    ratio: project.ratio,
-    creative_prompt: project.creative_prompt || "",
-    base_updated: project.updated,
+  const original = digest(r);
+  const production = structuredClone(p.production);
+  await mutate(p.id, "project-settings", {
+    title: "新的项目名称",
+    brief: "这是项目简介，不是剧情指令",
+    base_updated: p.updated,
   });
-  await mutate(p.id, "project-settings", { ...form(p), title: "重命名项目" });
   ({ p, r } = await f.read());
-  assert.equal(p.title, "重命名项目");
-  assert.equal(status(p, r, "story"), "approved");
+  assert.equal(digest(r), original);
+  assert.deepEqual(p.production, production);
   await assert.rejects(
-    () => mutate(p.id, "project-settings", { ...form(p), ratio: "bad" }),
-    /画幅/,
+    mutate(p.id, "project-settings", {
+      title: p.title,
+      brief: p.brief,
+      style: "不能混入项目",
+      base_updated: p.updated,
+    }),
+    /制作设置/,
   );
   await assert.rejects(
-    () => mutate(p.id, "project-settings", { ...form(p), base_updated: 0 }),
+    mutate(p.id, "project-settings", {
+      title: p.title,
+      brief: p.brief,
+      base_updated: 0,
+    }),
     /重新载入/,
+  );
+  const { revision, ...fields } = production;
+  await assert.rejects(
+    mutate(p.id, "production-settings", {
+      ...fields,
+      ratio: "bad",
+      base_revision: revision,
+    }),
+    /画幅/,
   );
   const copy = await f.op("runs", { name: "历史方案", inherit: "all" });
   p = await loadProject(p.id);
-  const finished = p.episodes[0].runs.find((run) => run.id === copy.run_id)!;
-  assert(finished);
-  finished.finished_at = Date.now() / 1000;
+  p.episodes[0].runs.find((run) => run.id === copy.run_id)!.finished_at =
+    Date.now() / 1000;
   await saveProject(p);
-  p = await loadProject(p.id);
-  const oldCount = p.episodes[0].runs[0].steps.story.versions.length;
-  await mutate(p.id, "project-settings", {
-    ...form(p),
-    brief: "更新后的创作方向",
+  await mutate(p.id, "production-settings", {
+    ...fields,
     style: "国风水墨",
     ratio: "9:16",
-    creative_prompt: "统一冷色调",
+    prompt: "统一冷色调",
+    adaptation: "优先保留人物关系",
+    base_revision: revision,
   });
   p = await loadProject(p.id);
   const active = p.episodes[0].runs.find((run) => run.id === f.ids.run_id)!;
   const locked = p.episodes[0].runs.find((run) => run.id === copy.run_id)!;
-  assert.equal(p.ratio, "9:16");
-  assert.equal(p.creative_prompt, "统一冷色调");
-  assert.equal(status(p, active, "story"), "stale");
-  assert.equal(status(p, locked, "story"), "approved");
-  assert.equal(active.steps.story.versions.length, oldCount);
-  assert.equal(active.steps.story.selected, r.steps.story.selected);
+  assert.equal(p.production.ratio, "9:16");
+  assert.equal(p.production.revision, revision + 1);
+  assert.equal(status(p, active, "story"), "approved");
+  assert.equal(status(p, active, "director"), "stale");
+  assert.equal(status(p, locked, "director"), "approved");
+  assert.deepEqual(active.steps.story, r.steps.story);
+  await assert.rejects(
+    mutate(p.id, "production-settings", { ...fields, base_revision: revision }),
+    /其他页面更新/,
+  );
+  const currentRevision = p.production.revision;
+  await mutate(p.id, "production-settings", {
+    ...p.production,
+    revision: undefined,
+    base_revision: currentRevision,
+  }).then(
+    () => assert.fail("unexpected field must be rejected"),
+    (error) => assert.match(error.message, /未知字段/),
+  );
+  const { revision: latest, ...currentFields } = p.production;
+  await mutate(p.id, "production-settings", {
+    ...currentFields,
+    base_revision: latest,
+  });
+  assert.equal((await loadProject(p.id)).production.revision, currentRevision);
 });
 
 test("episode covers extract a real first frame and cache it without regenerating media", async () => {
@@ -2184,107 +2428,42 @@ test("standalone assistant sessions chat without form tools or shared message hi
   }
 });
 
-test("story confirmation saves and selects the viewed draft atomically without a separate adopt step", async () => {
-  const { status } = await import("../src/lib/domain");
+test("video stories accept source selections and reject manual edits and generation", async () => {
   const f = await setup();
-  let { r } = await f.read();
-  const original = r.steps.story.selected;
-  const saved = await f.op("save-step", {
-    step: "story",
-    content: { text: "新的小说草稿" },
-    adopt: false,
-  });
-  ({ r } = await f.read());
-  assert.equal(r.steps.story.selected, original);
-  const count = r.steps.story.versions.length;
-  const confirmed = await f.op("confirm-story", {
-    version_id: saved.version_id,
-    content: { text: "新的小说草稿" },
-    expected_selected: original,
-    basis_revision: r.project_config_revision || 0,
-  });
-  let state = await f.read();
-  assert.equal(confirmed.version_id, saved.version_id);
-  assert.equal(state.r.steps.story.versions.length, count);
-  assert.equal(state.r.steps.story.selected, saved.version_id);
-  assert.equal(status(state.p, state.r, "story"), "approved");
-  const edited = await f.op("confirm-story", {
-    version_id: saved.version_id,
-    content: { text: "直接确认尚未保存的修改" },
-    expected_selected: saved.version_id,
-    basis_revision: state.r.project_config_revision || 0,
-  });
-  state = await f.read();
-  assert.equal(state.r.steps.story.versions.length, count + 1);
-  assert.equal(state.r.steps.story.selected, edited.version_id);
-  assert.equal(
-    selected(state.r, "story")!.content.text,
-    "直接确认尚未保存的修改",
-  );
-  assert.equal(selected(state.r, "story")!.approved, true);
-  await assert.rejects(
-    () =>
-      f.op("confirm-story", {
-        content: { text: "" },
-        expected_selected: edited.version_id,
-        basis_revision: state.r.project_config_revision || 0,
-      }),
-    /故事正文/,
-  );
-  await assert.rejects(
-    () =>
-      f.op("confirm-story", {
-        content: { text: "并发确认" },
-        expected_selected: original,
-        basis_revision: state.r.project_config_revision || 0,
-      }),
-    /确认版本已变更/,
-  );
-  assert.equal((await f.read()).r.steps.story.versions.length, count + 1);
+  const before = digest((await f.read()).r.steps.story);
+  for (const [action, body] of [
+    ["save-step", { step: "story", content: { text: "不能手写" } }],
+    ["adopt-step", { step: "story" }],
+    ["approve-step", { step: "story" }],
+    ["confirm-story", { content: { text: "不能手写" } }],
+    ["generate-text", { step: "story" }],
+    ["chat", { step: "story", message: "不能生成" }],
+  ] as [string, Json][])
+    await assert.rejects(f.op(action, body));
+  assert.equal(digest((await f.read()).r.steps.story), before);
+  const changed = await selectFixture(f, "新的定稿章节");
+  const { r } = await f.read();
+  assert.equal(r.steps.story.selected, changed.version_id);
+  assert.equal(selected(r, "story")!.approved, true);
+  assert.equal(selected(r, "story")!.content.text, "第一章\n\n新的定稿章节");
 });
 
-test("reconfirming a stale story preserves its old version and records the new project basis", async () => {
+test("video configuration changes preserve the selected story source and invalidate production", async () => {
   const { status } = await import("../src/lib/domain");
   const f = await setup();
-  let { p, r } = await f.read();
-  const old = structuredClone(selected(r, "story")!);
-  await mutate(p.id, "project-settings", {
-    title: p.title,
-    brief: "新的创作约定",
-    style: p.style,
-    ratio: p.ratio,
-    creative_prompt: p.creative_prompt || "",
-    base_updated: p.updated,
+  const { p, r } = await f.read();
+  const source = structuredClone(selected(r, "story")!);
+  await mutate(p.id, "production-settings", {
+    style: "水彩",
+    ratio: p.production.ratio,
+    prompt: p.production.prompt,
+    adaptation: "新的制作方向",
+    base_revision: p.production.revision,
   });
-  ({ p, r } = await f.read());
-  assert.equal(status(p, r, "story"), "stale");
-  await assert.rejects(
-    () =>
-      f.op("confirm-story", {
-        content: old.content,
-        version_id: old.id,
-        expected_selected: old.id,
-        basis_revision: 0,
-      }),
-    /创作约定已变更/,
-  );
-  const result = await f.op("confirm-story", {
-    content: old.content,
-    version_id: old.id,
-    expected_selected: old.id,
-    basis_revision: r.project_config_revision,
-  });
-  ({ p, r } = await f.read());
-  assert.notEqual(result.version_id, old.id);
-  assert.equal(status(p, r, "story"), "approved");
-  assert.deepEqual(
-    r.steps.story.versions.find((version) => version.id === old.id)!.inputs,
-    old.inputs,
-  );
-  assert.equal(
-    selected(r, "story")!.inputs.project_config,
-    r.project_config_revision,
-  );
+  const current = await f.read();
+  assert.equal(status(current.p, current.r, "story"), "approved");
+  assert.equal(status(current.p, current.r, "director"), "stale");
+  assert.deepEqual(selected(current.r, "story"), source);
 });
 
 test("story states coexist, inherit references, revise independently and bind only selected segments", async () => {
@@ -2381,8 +2560,13 @@ test("story states coexist, inherit references, revise independently and bind on
   const generated = selected(current.r, "characters")!.content.characters;
   assert.equal(
     generated.find((e: Json) => e.state_id === rain.state_id).images.length,
-    2,
+    0,
   );
+  const imageVersion = current.p.assets
+    .find((a) => a.id === asset_id)!
+    .versions.at(-1)!;
+  assert.equal(imageVersion.images.length, 1);
+  assert.equal(imageVersion.state_id, rain.state_id);
   assert.equal(
     generated.find((e: Json) => !e.state_id || e.state_id === "default").url,
     original.url,
@@ -2448,10 +2632,9 @@ test("permanent episode locks reject edits and new versions and preserve viewing
   const ids = await mutate(p.id, "episodes", { title: "锁定集" });
   const op = (action: string, body: Json = {}) =>
     mutate(p.id, action, { ...ids, ...body });
-  await op("save-step", {
-    step: "story",
-    content: { text: "锁定前故事" },
-    adopt: true,
+  await op("select-story", {
+    ...(await storyFixture(p.id, "锁定前故事")),
+    expected_selected: null,
   });
   const before = (await project(p.id)).project.episodes[0].runs[0];
   await op("lock-episode");
@@ -2465,13 +2648,12 @@ test("permanent episode locks reject edits and new versions and preserve viewing
     ["unlock-episode", {}],
   ] as [string, Json][])
     await assert.rejects(op(action, body), /永久锁定/);
-  await mutate(p.id, "project-settings", {
-    title: p.title,
-    brief: "新的方向",
-    style: p.style,
-    ratio: p.ratio,
-    creative_prompt: "",
-    base_updated: locked.updated,
+  await mutate(p.id, "production-settings", {
+    style: "水彩",
+    ratio: p.production.ratio,
+    prompt: "新的美术规范",
+    adaptation: "",
+    base_revision: p.production.revision,
   });
   const after = (await project(p.id)).project.episodes[0].runs[0];
   assert.deepEqual(after.statuses, before.statuses);
@@ -2517,4 +2699,754 @@ test("episode deletion removes all versions and jobs and keeps episode numbering
     (await loadProject(p.id)).episodes.map((candidate) => candidate.number),
     [2, 3],
   );
+});
+
+test("prompt director cards expose model limits and repair invalid short segments before becoming applicable", async () => {
+  const { assistForm } = await import("../src/lib/server/form-assistant");
+  const { workflowSummary } =
+    await import("../src/lib/server/creation-context");
+  const f = await setup();
+  const { p, r } = await f.read();
+  assert.equal(workflowSummary(p, r).video_model_capabilities.min, 4);
+  const frozen = digest(p);
+  const content = structuredClone(selected(r, "director")!.content);
+  for (const segment of content.segments) {
+    delete segment.duration;
+    delete segment.references;
+  }
+  const invalid = structuredClone(content);
+  invalid.segments[0].end = 2;
+  invalid.segments[1].start = 2;
+  let attempts = 0;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.tool_choice === "none") return formToolReply(body, {});
+    attempts++;
+    if (attempts === 2) {
+      const rejection = JSON.parse(body.messages.at(-1).content);
+      assert.equal(rejection.executed, false);
+      assert.match(rejection.error, /片段需连续排列，单段 4–/);
+    }
+    return formToolReply(
+      body,
+      attempts === 1 ? invalid : content,
+      "update_director_form",
+    );
+  };
+  try {
+    const result = await assistForm({
+      mode: "prompt",
+      context_scope: { project_id: p.id, ...f.ids },
+      form_source: { skill: "director", form: content, context: {} },
+      messages: [{ role: "user", text: "使用 @skill:director，生成八秒方案" }],
+    });
+    assert.equal(attempts, 2);
+    assert(result.patch);
+    assert.equal(result.patch.segments[0].duration, 4);
+    assert.equal(result.patch.segments[1].duration, 4);
+    assert.equal(digest(await loadProject(p.id)), frozen);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("prompt settings cards normalize new resource identities and can be saved without adopting or generating media", async () => {
+  const { assistForm } = await import("../src/lib/server/form-assistant");
+  const f = await setup();
+  const { p } = await f.read();
+  globalThis.fetch = async (_url, init) =>
+    formToolReply(
+      JSON.parse(String(init?.body)),
+      {
+        characters: [
+          {
+            kind: "prop",
+            name: "黄色雨伞",
+            description: "半透明蜡布，有手工补丁",
+            segment_ids: ["A", "B"],
+          },
+        ],
+      },
+      "update_settings_form",
+    );
+  try {
+    const result = await assistForm({
+      mode: "prompt",
+      context_scope: { project_id: p.id, ...f.ids },
+      form_source: {
+        skill: "settings",
+        form: { world: {}, characters: [] },
+        context: {},
+      },
+      messages: [{ role: "user", text: "使用 @skill:settings，生成设定集" }],
+    });
+    assert(result.patch);
+    assert(result.patch.characters[0].asset_id);
+    assert(result.patch.characters[0].version);
+    assert.equal((await loadProject(p.id)).assets.length, 0);
+    globalThis.fetch = async (_url, init) =>
+      formToolReply(
+        JSON.parse(String(init?.body)),
+        { world: { premise: "雨夜街角" } },
+        "update_settings_form",
+      );
+    const followup = await assistForm({
+      mode: "prompt",
+      context_scope: { project_id: p.id, ...f.ids },
+      form_source: { skill: "settings", form: result.patch, context: {} },
+      messages: [
+        { role: "user", text: "使用 @skill:settings，修改世界观为雨夜街角" },
+      ],
+    });
+    assert(followup.patch);
+    assert.equal(
+      followup.patch.characters[0].asset_id,
+      result.patch.characters[0].asset_id,
+    );
+    assert.equal((await loadProject(p.id)).assets.length, 0);
+    await f.op("save-step", { step: "characters", content: followup.patch });
+    assert.equal((await loadProject(p.id)).assets.length, 1);
+    assert.equal((await f.read()).r.steps.characters.versions.length, 2);
+    assert.equal(
+      (await f.read()).r.steps.characters.selected,
+      p.episodes[0].runs[0].steps.characters.selected,
+    );
+    assert.equal((await listJobs(p.id)).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("required prompt generation never reports success without a valid result card", async () => {
+  const { assistForm } = await import("../src/lib/server/form-assistant");
+  globalThis.fetch = async () =>
+    Response.json({
+      choices: [{ finish_reason: "stop", message: { content: "已生成" } }],
+    });
+  try {
+    await assert.rejects(
+      () =>
+        assistForm({
+          mode: "prompt",
+          messages: [{ role: "user", text: "使用 @skill:project，生成项目" }],
+        }),
+      /未生成有效结果卡片/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("episode information can be edited without recreating schemes and rejects stale or locked edits", async () => {
+  const f = await setup();
+  const { p, r } = await f.read();
+  const e = p.episodes[0];
+  const base_episode = {
+    title: e.title,
+    brief: e.brief,
+    target_duration: e.target_duration ?? 60,
+  };
+  const body = {
+    title: "新的集名",
+    brief: "新的本集剧情",
+    target_duration: 12,
+    base_episode,
+  };
+  const frozen = digest(r);
+  await f.op("episode-settings", body);
+  const saved = await loadProject(p.id);
+  assert.equal(saved.episodes.length, 1);
+  assert.equal(saved.episodes[0].title, body.title);
+  assert.equal(saved.episodes[0].brief, body.brief);
+  assert.equal(saved.episodes[0].target_duration, 12);
+  assert.equal(digest(saved.episodes[0].runs[0]), frozen);
+  await assert.rejects(f.op("episode-settings", body), /其他页面更新/);
+  const current = { title: body.title, brief: body.brief, target_duration: 12 };
+  for (const patch of [
+    { title: " " },
+    { brief: "x".repeat(10001) },
+    { target_duration: 0 },
+  ]) {
+    await assert.rejects(
+      f.op("episode-settings", { ...body, base_episode: current, ...patch }),
+    );
+  }
+  await assert.rejects(
+    f.op("episode-settings", { ...body, base_episode: undefined }),
+    /其他页面更新/,
+  );
+  await f.op("lock-episode");
+  await assert.rejects(
+    f.op("episode-settings", { ...body, base_episode: current }),
+    /永久锁定/,
+  );
+});
+
+test("combined storyboard saves atomically, compiles eight seconds into one request and preserves source stages when changing video models", async () => {
+  const { status, segments, generationPlanFresh } =
+    await import("../src/lib/domain");
+  const f = await setup();
+  const { r } = await f.read();
+  const content = {
+    prompt: "温暖的雨夜",
+    beats: [
+      {
+        id: "b1",
+        start: 0,
+        end: 2,
+        description:
+          "画面与动作：看见 @resource:umbrella_default\n镜头：固定\n台词与旁白：无对白\n声音：雨滴落在伞面",
+        camera: "固定",
+        dialogue: "无对白",
+        sound: "雨滴落在伞面",
+      },
+      {
+        id: "b2",
+        start: 2,
+        end: 5,
+        description: "撑起 @resource:umbrella_default",
+        camera: "推近",
+        dialogue: "",
+      },
+      {
+        id: "b3",
+        start: 5,
+        end: 8,
+        description: "停留",
+        camera: "固定",
+        dialogue: "",
+      },
+    ],
+  };
+  const resources = {
+    world: {},
+    characters: [
+      {
+        asset_id: "umbrella",
+        version: "umbrella-v1",
+        kind: "prop",
+        name: "黄色雨伞",
+        description: "黄色蜡布伞",
+        images: [{ url: "https://example.test/umbrella.jpg" }],
+        segment_ids: ["b1", "b2"],
+      },
+    ],
+  };
+  await f.op("save-storyboard", {
+    content,
+    resources,
+    confirm: true,
+    base_director: r.steps.director.selected,
+    base_resources: r.steps.characters.selected,
+  });
+  let current = await f.read();
+  assert.equal(status(current.p, current.r, "director"), "approved");
+  assert.equal(status(current.p, current.r, "characters"), "approved");
+  assert.equal(segments(current.r).length, 0);
+  const compiled = await f.op("compile-video-plan");
+  assert.equal(compiled.segments.length, 1);
+  assert.equal(compiled.segments[0].duration, 8);
+  const { videoPayload } = await import("../src/lib/server/providers");
+  const request = await videoPayload(
+    current.p,
+    current.r,
+    compiled.segments[0],
+  );
+  const videoPrompt = request.payload.content[0].text;
+  assert.equal(videoPrompt.split("画面与动作：看见 黄色雨伞").length - 1, 1);
+  assert.equal(videoPrompt.split("声音：雨滴落在伞面").length - 1, 1);
+  assert.equal(videoPrompt.split("黄色蜡布伞").length - 1, 1);
+  assert.equal(videoPrompt.split("温暖的雨夜").length - 1, 1);
+  assert.match(videoPrompt, /镜头 1｜0–2 秒/);
+  assert.match(videoPrompt, /镜头 2｜2–5 秒/);
+  assert.match(videoPrompt, /切镜/);
+  assert(!videoPrompt.includes("@resource:"));
+  assert(!videoPrompt.includes("本段提示词"));
+  assert.equal(
+    request.payload.content.filter((item: Json) => item.type === "image_url")
+      .length,
+    1,
+  );
+
+  assert.match(compiled.segments[0].prompt, /声音：雨滴落在伞面/);
+  assert.match(
+    selected(current.r, "director")!.content.beats[0].description,
+    /声音：雨滴落在伞面/,
+  );
+  assert.equal(
+    selected(current.r, "director")!.content.beats[0].sound,
+    undefined,
+  );
+  const preview = await f.op("preview-video-batch");
+  assert.equal(preview.new_count, 1);
+  assert.equal(preview.new_seconds, 8);
+  assert.equal((await listJobs(f.pid)).length, 0);
+  current = await f.read();
+  assert.equal(generationPlanFresh(current.r), true);
+  await f.op("model", { model: "doubao-seedance-2-0-fast-260128" });
+  current = await f.read();
+  assert.equal(status(current.p, current.r, "director"), "approved");
+  assert.equal(status(current.p, current.r, "characters"), "approved");
+  assert.equal(generationPlanFresh(current.r), false);
+  await assert.rejects(f.op("preview-video-batch"), /重新组合/);
+  await f.op("compile-video-plan");
+  assert.equal(generationPlanFresh((await f.read()).r), true);
+  await assert.rejects(
+    f.op("save-storyboard", {
+      content,
+      resources,
+      confirm: true,
+      base_director: null,
+      base_resources: null,
+    }),
+    /重新载入/,
+  );
+});
+
+test("storyboard drafts can prepare reference images before final confirmation", async () => {
+  const f = await setup();
+  const { r } = await f.read();
+  await f.op("save-storyboard", {
+    content: {
+      prompt: "",
+      beats: [
+        {
+          id: "draft-shot",
+          start: 0,
+          end: 8,
+          description: "雨伞",
+          camera: "",
+          dialogue: "",
+          resources_reviewed: true,
+        },
+      ],
+    },
+    resources: {
+      world: {},
+      characters: [
+        {
+          asset_id: "draft-umbrella",
+          version: "draft-umbrella-v1",
+          kind: "prop",
+          name: "雨伞",
+          description: "黄色蜡布伞",
+          images: [],
+          segment_ids: ["draft-shot"],
+        },
+      ],
+    },
+    base_director: r.steps.director.selected,
+    base_resources: r.steps.characters.selected,
+  });
+  const current = await f.read();
+  const { status } = await import("../src/lib/domain");
+  assert.equal(status(current.p, current.r, "characters"), "draft");
+  await assert.rejects(f.op("compile-video-plan"), /确认/);
+  const result = await f.op("generate-all-settings", {
+    version_id: current.r.steps.characters.selected,
+  });
+  assert.equal(result.queued, 1);
+  assert.equal((await listJobs(f.pid)).length, 1);
+  // A different story invalidates this draft's right to generate images.
+  await selectFixture(f, "另一个故事");
+  await assert.rejects(
+    f.op("character-image", { asset_id: "draft-umbrella" }),
+    /更新并确认/,
+  );
+});
+
+test("storyboard creation and resource analysis share text and workflow model settings and only return proposals", async () => {
+  const { storyboardAssistant } =
+    await import("../src/lib/server/storyboard-assistant");
+  const f = await setup();
+  const { p } = await f.read();
+  const frozen = digest(p);
+  const saved = await config();
+  await storeConfig({
+    ...saved,
+    text_provider: "ark",
+    text_model: "text-unit",
+    agent_provider: "ark",
+    agent_model: "workflow-unit",
+  });
+  const content = {
+    prompt: "雨夜",
+    beats: [
+      {
+        id: "b1",
+        start: 0,
+        end: 2,
+        description: "机器人停下",
+      },
+      {
+        id: "b2",
+        start: 2,
+        end: 8,
+        description: "机器人撑伞",
+      },
+    ],
+  };
+  const models: string[] = [];
+  let resourceAttempts = 0;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    models.push(body.model);
+    if (body.tool_choice === "none") return formToolReply(body, {});
+    if (body.model === "workflow-unit") {
+      resourceAttempts++;
+      if (resourceAttempts > 1) {
+        const feedback = body.messages.find((m: Json) => m.role === "tool");
+        assert.match(feedback.content, /characters\[0\].*未授权字段：manual/);
+        assert.equal(JSON.parse(feedback.content).executed, false);
+      }
+    }
+    return body.model === "text-unit"
+      ? formToolReply(body, content, "propose_storyboard")
+      : formToolReply(
+          body,
+          {
+            world: {},
+            characters: [
+              {
+                ...(resourceAttempts === 1 ? { manual: true } : {}),
+                asset_id: "",
+                version: "",
+                kind: "prop",
+                name: "雨伞",
+                description: "黄色蜡布伞",
+                segment_ids: ["b2"],
+              },
+            ],
+          },
+          "propose_resource_bindings",
+        );
+  };
+  try {
+    const first = await storyboardAssistant(p.id, {
+      ...f.ids,
+      role: "storyboard",
+      content: { prompt: "", beats: [] },
+      resources: { world: {}, characters: [] },
+    });
+    assert.equal(first.patch?.planning_mode, "storyboard");
+    assert.deepEqual(first.patch?.segments, []);
+    const second = await storyboardAssistant(p.id, {
+      ...f.ids,
+      role: "resource",
+      content: first.patch,
+      resources: { world: {}, characters: [] },
+    });
+    assert(second.patch?.characters[0].asset_id);
+    assert.deepEqual(second.patch?.characters[0].segment_ids, ["b2"]);
+    assert(models.includes("text-unit"));
+    assert(models.includes("workflow-unit"));
+    assert.equal(resourceAttempts, 2);
+    assert.equal(second.patch?.characters[0].manual, false);
+    assert.equal(digest(await loadProject(p.id)), frozen);
+    assert.equal((await listJobs(p.id)).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await storeConfig(saved);
+  }
+});
+
+test("single-shot optimization uses shared text model, preserves tags and never writes project state", async () => {
+  const { storyboardAssistant } =
+    await import("../src/lib/server/storyboard-assistant");
+  const f = await setup();
+  const frozen = digest(await loadProject(f.pid));
+  const saved = await config();
+  await storeConfig({
+    ...saved,
+    text_provider: "ark",
+    text_model: "shot-unit",
+  });
+  const content = {
+    prompt: "无对白",
+    beats: [
+      {
+        id: "b1",
+        start: 0,
+        end: 2,
+        description: "@resource:robot_default 走近。",
+      },
+      { id: "b2", start: 2, end: 8, description: "撑伞。" },
+    ],
+  };
+  const description =
+    "画面与动作：@resource:robot_default 走近邮筒。\n镜头：低机位缓慢推近。\n台词与旁白：无对白\n声音：细雨与脚步声。";
+  let attempts = 0;
+  globalThis.fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body));
+    assert.equal(request.model, "shot-unit");
+    if (request.tool_choice === "none") return formToolReply(request, {});
+    attempts++;
+    const context = JSON.parse(request.messages[1].content);
+    assert.deepEqual(context.current_shot, content.beats[0]);
+    assert.deepEqual(context.current_storyboard.beats[1], content.beats[1]);
+    assert.deepEqual(
+      Object.keys(request.tools[0].function.parameters.properties),
+      ["description"],
+    );
+    if (attempts === 2)
+      assert.match(
+        request.messages.findLast((message: Json) => message.role === "tool")
+          .content,
+        /保留当前镜头的全部资源标签/,
+      );
+    return formToolReply(
+      request,
+      { description: attempts === 1 ? "错误地删除资源" : description },
+      "optimize_shot",
+    );
+  };
+  try {
+    const response = await storyboardAssistant(f.pid, {
+      ...f.ids,
+      role: "storyboard",
+      operation: "optimize",
+      beat_id: "b1",
+      content,
+      resources: { world: {}, characters: [] },
+    });
+    assert.equal(attempts, 2);
+    assert.equal(response.role, "shot");
+    assert.equal(response.beat_id, "b1");
+    assert.deepEqual(response.patch, { description });
+    assert.equal(digest(await loadProject(f.pid)), frozen);
+    assert.equal((await listJobs(f.pid)).length, 0);
+    await assert.rejects(
+      storyboardAssistant(f.pid, {
+        ...f.ids,
+        role: "storyboard",
+        operation: "optimize",
+        beat_id: "missing",
+        content,
+      }),
+      /有效分镜/,
+    );
+    assert.equal(attempts, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await storeConfig(saved);
+  }
+});
+
+test("required result schema failures are bounded and execute no tools in an invalid batch", async () => {
+  const { runCreationAgent } = await import("../src/lib/server/creation-agent");
+  let requests = 0;
+  let executions = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return Response.json({
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: {
+            content: null,
+            tool_calls: [
+              {
+                id: `read-${requests}`,
+                type: "function",
+                function: { name: "read", arguments: "{}" },
+              },
+              {
+                id: `write-${requests}`,
+                type: "function",
+                function: {
+                  name: "write",
+                  arguments: JSON.stringify({ forbidden: true }),
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+  };
+  try {
+    await assert.rejects(
+      () =>
+        runCreationAgent({
+          instructions: "返回结果",
+          context: {},
+          messages: [],
+          requireResult: true,
+          maxReads: 1,
+          tools: ["read", "write"].map((name) => ({
+            name,
+            description: name,
+            readOnly: name === "read",
+            parameters: {
+              type: "object",
+              properties: {},
+              additionalProperties: false,
+            },
+            execute() {
+              executions++;
+            },
+          })),
+        }),
+      /未生成有效结果卡片/,
+    );
+    assert.equal(requests, 3);
+    assert.equal(executions, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("resource matching preserves immutable reference images when its world summary or descriptions differ", async () => {
+  const { storyboardAssistant } =
+    await import("../src/lib/server/storyboard-assistant");
+  const f = await setup();
+  const { r } = await f.read();
+  const content = {
+    prompt: "雨夜",
+    beats: [
+      {
+        id: "b1",
+        start: 0,
+        end: 8,
+        description: "黄色雨伞",
+        camera: "固定",
+        dialogue: "",
+        resources_reviewed: true,
+      },
+    ],
+  };
+  const resources = {
+    world: { premise: "旧规范" },
+    characters: [
+      {
+        asset_id: "reference-umbrella",
+        version: "reference-v1",
+        kind: "prop",
+        name: "黄色雨伞",
+        description: "原始蜡布描述",
+        images: [{ url: "https://example.test/umbrella.jpg" }],
+        segment_ids: ["b1"],
+      },
+    ],
+  };
+  await f.op("save-storyboard", {
+    content,
+    resources,
+    base_director: r.steps.director.selected,
+    base_resources: r.steps.characters.selected,
+  });
+  globalThis.fetch = async (_url, init) =>
+    formToolReply(
+      JSON.parse(String(init?.body)),
+      {
+        world: { premise: "重述规范" },
+        characters: [
+          {
+            asset_id: "reference-umbrella",
+            version: "reference-v1",
+            kind: "prop",
+            name: "雨伞",
+            description: "模型重述的外观",
+            appearance_changed: true,
+            segment_ids: ["b1"],
+          },
+        ],
+      },
+      "propose_resource_bindings",
+    );
+  try {
+    const result = await storyboardAssistant(f.pid, {
+      ...f.ids,
+      role: "resource",
+      content,
+      resources,
+    });
+    assert(result.patch);
+    const entry = result.patch.characters[0];
+    assert.equal(entry.description, "原始蜡布描述");
+    assert.equal(entry.version, "reference-v1");
+    assert.equal(entry.images.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("resource matching preserves manual per-shot choices and fills other shots", async () => {
+  const { storyboardAssistant } =
+    await import("../src/lib/server/storyboard-assistant");
+  const f = await setup();
+  const { r } = await f.read();
+  const content = {
+    prompt: "雨夜",
+    beats: [
+      {
+        id: "b1",
+        start: 0,
+        end: 4,
+        description: "黄色雨伞",
+        camera: "固定",
+        dialogue: "",
+      },
+      {
+        id: "b2",
+        start: 4,
+        end: 8,
+        description: "黄色雨伞",
+        camera: "固定",
+        dialogue: "",
+      },
+    ],
+  };
+  const manual = {
+    asset_id: "manual-umbrella",
+    version: "manual-v1",
+    kind: "prop",
+    name: "黄色雨伞",
+    description: "蜡布伞",
+    images: [{ url: "https://example.test/umbrella.jpg" }],
+    segment_ids: ["b1"],
+    manual: true,
+    reference_image: "https://example.test/umbrella.jpg",
+  };
+  const resources = { world: {}, characters: [manual] };
+  await f.op("save-storyboard", {
+    content,
+    resources,
+    base_director: r.steps.director.selected,
+    base_resources: r.steps.characters.selected,
+  });
+  globalThis.fetch = async (_url, init) =>
+    formToolReply(
+      JSON.parse(String(init?.body)),
+      {
+        world: {},
+        characters: [
+          {
+            asset_id: manual.asset_id,
+            version: manual.version,
+            kind: manual.kind,
+            name: manual.name,
+            description: manual.description,
+            segment_ids: ["b1", "b2"],
+          },
+        ],
+      },
+      "propose_resource_bindings",
+    );
+  try {
+    const result = await storyboardAssistant(f.pid, {
+      ...f.ids,
+      role: "resource",
+      content,
+      resources,
+    });
+    assert(result.patch);
+    assert.equal(result.patch.characters.length, 2);
+    assert.deepEqual(result.patch.characters[0], manual);
+    assert.deepEqual(result.patch.characters[1].segment_ids, ["b2"]);
+    assert.equal(result.patch.characters[1].images.length, 1);
+    assert(result.patch.characters[1].binding_id);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

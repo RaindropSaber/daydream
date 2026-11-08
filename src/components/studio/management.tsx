@@ -1,18 +1,11 @@
 "use client";
 import { useEffect, useState } from "react";
 import {
-  assetStates,
-  stateId,
-  stateName,
-  resourceVersionLabel,
-} from "@/lib/asset-state";
-import {
   Plus,
   ArrowUpRight,
   Search,
   Check,
   RefreshCw,
-  Download,
   Play,
   Pencil,
   Film,
@@ -35,7 +28,6 @@ import {
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
-import { projectCreativeText } from "@/lib/creative-spec";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -49,9 +41,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api, useStudio, useAction } from "./context";
-import { CreateDialog, Choice } from "./forms";
+import { useCreativeAction } from "./creative-action";
+import { CreateDialog, Choice, ProductionSettingsDialog } from "./forms";
 import { Heading, Empty, StatusBadge, date, kindNames } from "./common";
-import { STEPS, TITLES, type Json, type Asset } from "@/lib/types";
+import { STEPS, TITLES, type Json } from "@/lib/types";
 export function Projects({ projects }: { projects: Json[] }) {
   const { navigate } = useStudio();
   const [search, setSearch] = useState("");
@@ -127,8 +120,6 @@ export function Projects({ projects }: { projects: Json[] }) {
                   </p>
                 )}
                 <div className="flex gap-2">
-                  <Badge variant="secondary">{p.style}</Badge>
-                  <Badge variant="secondary">{p.ratio}</Badge>
                   <Badge variant="secondary">{p.episodes} 集</Badge>
                 </div>
                 <p className="text-xs text-muted-foreground">
@@ -153,337 +144,9 @@ export function Projects({ projects }: { projects: Json[] }) {
     </>
   );
 }
-export function ProjectOverview() {
-  const { project: p, navigate, jobs } = useStudio();
-  const [create, setCreate] = useState(false);
-  const { action, busy } = useAction();
-  if (!p) return null;
-  const download = () =>
-    action(async () => {
-      const data = await api(`/api/studio/projects/${p.id}/export`);
-      const url = URL.createObjectURL(
-        new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
-      );
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = p.title + "-制作清单.json";
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    });
-  return (
-    <>
-      <Heading
-        title={p.title}
-        description={p.brief}
-        actions={
-          <>
-            <Button
-              variant="outline"
-              disabled={busy}
-              onClick={() => void download()}
-            >
-              <Download />
-              导出项目
-            </Button>
-            <Button onClick={() => setCreate(true)}>
-              <Plus />
-              新建分集
-            </Button>
-          </>
-        }
-      />
-      <div className="mb-8 flex flex-wrap gap-3 border-y py-4 text-sm text-muted-foreground">
-        <span>{p.style}</span>
-        <span>·</span>
-        <span>{p.ratio}</span>
-        <span>·</span>
-        <span>{p.episodes.length} 集</span>
-        <span>·</span>
-        <span>{p.assets.length} 份共享资源</span>
-      </div>
-      <h2 className="mb-4 font-semibold">分集</h2>
-      {p.episodes.length ? (
-        <div className="space-y-3">
-          {episodeCards(p, jobs).map(
-            ({ episode: e, run: r, step, hasNewVersion }) => {
-              if (!r) return null;
-              const complete = STEPS.filter(
-                (s) => r.statuses?.[s] === "approved",
-              ).length;
-              return (
-                <button
-                  key={e.id}
-                  onClick={() =>
-                    navigate("episode", {
-                      project: p.id,
-                      episode: e.id,
-                      run: r.id,
-                      step,
-                    })
-                  }
-                  className="flex w-full flex-wrap items-center gap-5 rounded-xl border bg-card p-5 text-left transition hover:border-primary/40"
-                >
-                  <span className="grid size-12 place-items-center rounded-lg bg-muted text-lg tabular-nums text-muted-foreground">
-                    {String(e.number).padStart(2, "0")}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-semibold">{e.title}</span>
-                    <span className="mt-1 block truncate text-sm text-muted-foreground">
-                      {e.brief || ""}
-                    </span>
-                    <span className="mt-2 block text-xs text-muted-foreground">
-                      {e.runs.length} 个制作方案
-                      {hasNewVersion ? " · 有新版本" : ""}
-                    </span>
-                  </span>
-                  <span className="hidden space-y-2 md:block">
-                    <span className="flex gap-1">
-                      {STEPS.map((s) => (
-                        <span
-                          key={s}
-                          className={`h-1 w-6 rounded ${r.statuses?.[s] === "approved" ? "bg-primary/70" : "bg-muted"}`}
-                        />
-                      ))}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {complete} / {STEPS.length} 步完成
-                    </span>
-                  </span>
-                  <span className="text-sm text-primary">
-                    {e.locked_at
-                      ? "查看制作"
-                      : r.finished_at
-                        ? "查看已结束方案"
-                        : "继续" + TITLES[step]}{" "}
-                    →
-                  </span>
-                </button>
-              );
-            },
-          )}
-        </div>
-      ) : (
-        <Empty>暂无分集</Empty>
-      )}
-      {create && (
-        <CreateDialog
-          type="episode"
-          onClose={() => setCreate(false)}
-          onCreated={(data) =>
-            navigate("episode", {
-              project: p.id,
-              episode: data.episode_id,
-              run: data.run_id,
-              step: "story",
-            })
-          }
-        />
-      )}
-    </>
-  );
-}
-export function Assets() {
-  const { project: p } = useStudio();
-  const [edit, setEdit] = useState<Json | null | undefined>(undefined);
-  const [category, setCategory] = useState("all");
-  if (!p) return null;
-  const list = p.assets.filter(
-    (a) => category === "all" || a.kind === category,
-  );
-  return (
-    <>
-      <Heading
-        title="共享资源"
-        actions={
-          <Button
-            onClick={() =>
-              setEdit(category === "all" ? null : { kind: category })
-            }
-          >
-            <Plus />
-            新增资源
-          </Button>
-        }
-      />
-      <div
-        className="mb-5 flex flex-wrap gap-2"
-        role="group"
-        aria-label="资源分类"
-      >
-        {Object.entries({ all: "全部", ...kindNames }).map(([kind, name]) => (
-          <Button
-            key={kind}
-            variant={category === kind ? "default" : "outline"}
-            size="sm"
-            aria-pressed={category === kind}
-            onClick={() => setCategory(kind)}
-          >
-            {name} ·{" "}
-            {kind === "all"
-              ? p.assets.length
-              : p.assets.filter((a) => a.kind === kind).length}
-          </Button>
-        ))}
-      </div>
-      {list.length ? (
-        <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-          {list.map((a) => (
-            <AssetCard
-              key={a.id}
-              asset={a}
-              onEdit={(v) =>
-                setEdit({ asset_id: a.id, name: a.name, kind: a.kind, ...v })
-              }
-            />
-          ))}
-        </div>
-      ) : (
-        <Empty>
-          {category === "all" ? "暂无资源" : `暂无${kindNames[category]}资源`}
-        </Empty>
-      )}
-      {edit !== undefined && (
-        <CreateDialog
-          type="asset"
-          initial={edit || undefined}
-          onClose={() => setEdit(undefined)}
-        />
-      )}
-    </>
-  );
-}
-function AssetCard({
-  asset: a,
-  onEdit,
-}: {
-  asset: Asset;
-  onEdit: (v: Json) => void;
-}) {
-  const { jobs, mutate } = useStudio();
-  const { busy, action } = useAction();
-  const states = assetStates(a);
-  const [state, setState] = useState(
-    stateId(a.versions.find((v) => v.id === a.selected) || {}),
-  );
-  const versions = a.versions.filter((v) => stateId(v) === state);
-  const [id, setId] = useState(a.selected || a.versions.at(-1)?.id);
-  useEffect(() => {
-    setId(versions.at(-1)?.id);
-  }, [a.versions.length, state]);
-  const v = versions.find((v) => v.id === id) || versions.at(-1)!;
-  const imageJob = jobs.find(
-    (j) =>
-      j.kind === "asset-image" &&
-      j.segment_id === a.id &&
-      (j.state_id || "default") === state,
-  );
-  const generating = imageJob && ["queued", "running"].includes(imageJob.state);
-  const canGenerate = ["character", "scene", "prop"].includes(a.kind);
-  return (
-    <Card className="shadow-none">
-      <CardHeader>
-        <CardTitle className="flex justify-between text-base">
-          {a.name}
-          <Badge variant="secondary">{kindNames[a.kind]}</Badge>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <Choice
-          label={`${a.name}剧情状态`}
-          value={state}
-          onChange={setState}
-          options={Object.fromEntries(
-            states.map((v) => [stateId(v), stateName(v)]),
-          )}
-        />
-        {!!v.tags?.length && (
-          <div className="flex flex-wrap gap-1">
-            {v.tags.map((tag: string) => (
-              <Badge key={tag} variant="secondary">
-                {tag}
-              </Badge>
-            ))}
-          </div>
-        )}
-        {v.images?.length > 0 && (
-          <div className="grid grid-cols-2 gap-2">
-            {v.images.map((i: Json) => (
-              <a href={i.url} key={i.url} target="_blank" rel="noreferrer">
-                <img
-                  className="aspect-square w-full rounded-lg bg-muted object-contain"
-                  src={i.url}
-                  alt={a.name}
-                />
-              </a>
-            ))}
-          </div>
-        )}
-        <p className="max-h-44 overflow-auto whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
-          {v.description}
-        </p>
-        <Choice
-          label={`${a.name}版本`}
-          value={v.id}
-          onChange={setId}
-          options={Object.fromEntries(
-            [...versions]
-              .reverse()
-              .map((v) => [
-                v.id,
-                `${resourceVersionLabel(v)} · ${date(v.created)}`,
-              ]),
-          )}
-        />
-        {imageJob && (generating || imageJob.state === "failed") && (
-          <p role="status" className="text-sm text-muted-foreground">
-            {imageJob.message}
-          </p>
-        )}
-        <div className="flex flex-wrap gap-2">
-          {canGenerate && (
-            <Button
-              size="sm"
-              disabled={busy || !!generating}
-              onClick={() =>
-                void action(() =>
-                  mutate("asset-image", { asset_id: a.id, version_id: v.id }),
-                )
-              }
-            >
-              {generating
-                ? "出图中…"
-                : v.images?.length
-                  ? "重新出图"
-                  : "生成设定图"}
-            </Button>
-          )}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              onEdit({
-                description: v.description,
-                url: v.url || "",
-                base_version: v.id,
-                state_name: stateName(v),
-              })
-            }
-          >
-            修正当前状态
-          </Button>
-          {v.url && (
-            <Button variant="ghost" size="sm" asChild>
-              <a href={v.url} target="_blank" rel="noreferrer">
-                参考素材 ↗
-              </a>
-            </Button>
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
+export { Assets } from "./assets";
 export function Jobs() {
+  const creativeAction = useCreativeAction();
   const { jobs, refresh, mutate, navigate, project } = useStudio();
   const [filter, setFilter] = useState("all");
   const { busy, action } = useAction();
@@ -557,7 +220,7 @@ export function Jobs() {
                       </p>
                       <p className="mt-1 text-xs text-muted-foreground">
                         {j.kind === "asset-image"
-                          ? `共享资源 · ${project?.assets.find((a) => a.id === j.segment_id)?.name || "资源"}`
+                          ? `素材库 · ${project?.assets.find((a) => a.id === j.segment_id)?.name || "资源"}`
                           : `${ep?.title || ""} · ${run?.name || ""}`}
                       </p>
                       {j.state === "failed" && (
@@ -602,18 +265,22 @@ export function Jobs() {
                               variant="outline"
                               disabled={busy}
                               onClick={() =>
-                                void action(() =>
-                                  mutate(
-                                    j.kind === "video-batch"
-                                      ? "resume-video-batch"
-                                      : "resume",
-                                    {
-                                      episode_id: j.episode_id,
-                                      run_id: j.run_id,
-                                      job_id: j.id,
-                                    },
-                                  ),
-                                )
+                                creativeAction({
+                                  title: "继续未完成任务",
+                                  description: `继续${names[j.kind] || j.kind}，保留已完成结果；需要继续生成时按供应商实际计费。`,
+                                  label: "继续任务",
+                                  action: () =>
+                                    mutate(
+                                      j.kind === "video-batch"
+                                        ? "resume-video-batch"
+                                        : "resume",
+                                      {
+                                        episode_id: j.episode_id,
+                                        run_id: j.run_id,
+                                        job_id: j.id,
+                                      },
+                                    ),
+                                })
                               }
                             >
                               继续
@@ -637,6 +304,7 @@ export function Jobs() {
 export function ProjectSettings() {
   const { project, mutate, navigate, jobs, confirm } = useStudio();
   const [editing, setEditing] = useState(false);
+  const [editingProduction, setEditingProduction] = useState(false);
   const [create, setCreate] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [playError, setPlayError] = useState(false);
@@ -645,47 +313,35 @@ export function ProjectSettings() {
   const playing = completed.find((item) => item.episode.id === playingId);
   return (
     <div className="mx-auto max-w-6xl space-y-5 py-5">
-      <header className="flex items-center justify-between gap-3">
-        <h1 className="min-w-0 break-words text-lg font-semibold">
-          {project!.title}
-        </h1>
-      </header>
-      <section
-        aria-label="基础信息"
-        className="rounded-lg border bg-card px-4 py-3"
-      >
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-sm font-medium">
-            基础信息 · {project!.style} · {project!.ratio}
-          </h2>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="shrink-0"
-            onClick={() => setEditing(true)}
-          >
+      <header className="space-y-2">
+        <div className="flex items-start justify-between gap-3">
+          <h1 className="min-w-0 break-words text-lg font-semibold">
+            {project!.title}
+          </h1>
+          <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
             <Pencil className="size-3.5" />
-            编辑
+            编辑项目
           </Button>
         </div>
-        <dl className="mt-4 max-h-72 space-y-4 overflow-y-auto pr-2 text-sm">
-          <div>
-            <dt className="text-xs text-muted-foreground">创作方向</dt>
-            <dd className="mt-1 whitespace-pre-wrap break-words leading-7">
-              {project!.brief || "尚未填写"}
-            </dd>
-          </div>
-          {projectCreativeText(project!) && (
-            <div>
-              <dt className="text-xs text-muted-foreground">项目创作规范</dt>
-              <dd className="mt-1 whitespace-pre-wrap break-words leading-7">
-                {projectCreativeText(project!)}
-              </dd>
-            </div>
-          )}
-        </dl>
-      </section>
+        <p className="max-w-3xl whitespace-pre-wrap break-words text-sm leading-7 text-muted-foreground">
+          {project!.brief || "添加项目简介，方便识别这部作品。"}
+        </p>
+      </header>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-5">
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="font-semibold">视频制作</h2>
+          <span className="text-xs text-muted-foreground">
+            {project!.production.style} · {project!.production.ratio}
+          </span>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setEditingProduction(true)}
+        >
+          制作设置
+        </Button>
+      </div>
       <section aria-label="分集" className="space-y-3">
         <div className="flex items-center justify-between text-xs text-muted-foreground">
           <span>
@@ -889,6 +545,9 @@ export function ProjectSettings() {
           )}
         </div>
       </section>
+      {editingProduction && (
+        <ProductionSettingsDialog onClose={() => setEditingProduction(false)} />
+      )}
       {editing && (
         <CreateDialog
           type="project"
@@ -896,13 +555,10 @@ export function ProjectSettings() {
           initial={{
             title: project!.title,
             brief: project!.brief,
-            style: project!.style,
-            ratio: project!.ratio,
-            creative_prompt: projectCreativeText(project!),
             base_updated: project!.updated,
           }}
           onClose={() => setEditing(false)}
-          onCreated={() => toast.success("项目基础信息已保存")}
+          onCreated={() => toast.success("项目名称与简介已保存")}
         />
       )}
       {create && (

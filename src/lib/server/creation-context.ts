@@ -23,6 +23,8 @@ export function workflowSummary(p: Project, r: Run) {
   return {
     run_id: r.id,
     name: r.name,
+    model: r.model,
+    video_model_capabilities: PROFILES[r.model],
     finished_at: r.finished_at ?? null,
     project_config_revision: r.project_config_revision ?? 0,
     stages: Object.fromEntries(
@@ -73,7 +75,7 @@ export function creationReadTools(scope: {
       name: "get_project_context",
       readOnly: true,
       description:
-        "读取当前项目已保存的基础信息、统一创作规范与分集/方案目录。项目未创建时返回 exists=false；未保存内容以 current_form 为准。",
+        "读取当前项目已保存的名称与简介、视频制作设置与分集/方案目录。项目未创建时返回 exists=false；未保存内容以 current_form 为准。",
       parameters: empty,
       async execute() {
         const p = await scope.load();
@@ -85,9 +87,8 @@ export function creationReadTools(scope: {
           id: p.id,
           title: p.title,
           brief: p.brief,
-          style: p.style,
-          ratio: p.ratio,
-          creative_prompt: projectPrompt(p),
+          production: p.production,
+          production_prompt: projectPrompt(p),
           episodes: p.episodes.map((e) => ({
             id: e.id,
             title: e.title,
@@ -109,7 +110,7 @@ export function creationReadTools(scope: {
       name: "get_workflow_status",
       readOnly: true,
       description:
-        "读取指定分集方案各环节的 empty/draft/approved/stale 状态、选中/最新版本 ID、结束状态和近期任务。省略目标时使用当前方案。",
+        "读取指定分集方案各环节的 empty/draft/approved/stale 状态、选中/最新版本 ID、结束状态和近期任务。仅在上下文已有分集时可省略 episode_id；否则先用 get_project_context 查目录并显式指定分集。项目级制作设置不依赖此工具。",
       parameters: { ...empty, properties: target },
       async execute(args: Json) {
         const p = await get();
@@ -137,7 +138,7 @@ export function creationReadTools(scope: {
       name: "get_stage_content",
       readOnly: true,
       description:
-        "读取一个环节的版本目录、当前选中稿、有效已确认稿与最新草稿的完整内容；可指定 version_id 读取历史稿。其他分集/方案仅限当前项目。generation 返回实际片段时长/有效性，finish 返回导出记录。",
+        "读取一个环节的版本目录、当前选中稿、有效已确认稿与最新草稿的完整内容；可指定 version_id 读取历史稿。仅在上下文已有分集时可省略 episode_id，否则先用 get_project_context 查目录并显式指定分集。其他分集/方案仅限当前项目。项目级制作设置不依赖此工具。generation 返回实际片段时长/有效性，finish 返回导出记录。",
       parameters: {
         ...empty,
         properties: {
@@ -193,7 +194,7 @@ export function creationReadTools(scope: {
       name: "get_project_assets",
       readOnly: true,
       description:
-        "读取当前项目共享资源与真实版本引用，用于保持角色/场景/道具一致性；不编造资源 ID、版本或图片地址。",
+        "读取当前项目素材库与真实版本引用，用于保持角色/场景/道具一致性；不编造资源 ID、版本或图片地址。",
       parameters: empty,
       async execute() {
         return { assets: (await get()).assets };

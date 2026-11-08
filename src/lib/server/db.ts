@@ -3,9 +3,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import { mkdirSync, chmodSync } from "node:fs";
 import path from "node:path";
-import dotenv from "dotenv";
-dotenv.config({ path: ".env.local", quiet: true });
-dotenv.config({ path: ".env", quiet: true });
+import { databasePath } from "./storage-paths";
+export { databasePath } from "./storage-paths";
 
 export type QueryResult = { rows: Record<string, any>[]; rowCount: number };
 export type DB = {
@@ -29,11 +28,6 @@ const jsonColumns = new Set([
   "data",
   "report",
 ]);
-export const databasePath = () =>
-  path.resolve(
-    process.env.SQLITE_PATH ||
-      path.join(process.env.DATA_DIR || "data", "frameflow.sqlite3"),
-  );
 
 function bind(value: unknown): SQLInputValue {
   if (value == null) return null;
@@ -126,14 +120,14 @@ export async function transaction<T>(fn: (db: DB) => Promise<T>): Promise<T> {
     }
   });
 }
-export async function migrate() {
+export async function migrate(through?: string) {
   await transaction(async (db) => {
     await db.exec(
       "CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     );
     const folder = path.resolve("db/sqlite-migrations");
     for (const name of (await fs.readdir(folder))
-      .filter((n) => n.endsWith(".sql"))
+      .filter((n) => n.endsWith(".sql") && (!through || n <= through))
       .sort()) {
       if (
         (

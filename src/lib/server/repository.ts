@@ -1,3 +1,4 @@
+import { currentAccount, assertProjectAccess } from "./account-context";
 import { database, transaction, type DB } from "./db";
 import {
   type Project,
@@ -12,7 +13,8 @@ const omit = (v: Json, keys: string[]) =>
   Object.fromEntries(Object.entries(v).filter(([k]) => !keys.includes(k)));
 export async function listProjects() {
   const { rows } = await database().query(
-    `SELECT p.id,p.title,p.brief,p.style,p.ratio,p.updated_at AS updated,(SELECT count(*) FROM episodes e WHERE e.project_id=p.id) AS episodes,(SELECT count(*) FROM assets a WHERE a.project_id=p.id) AS assets FROM projects p ORDER BY updated_at DESC`,
+    `SELECT p.id,p.title,p.brief,p.updated_at AS updated,(SELECT count(*) FROM episodes e WHERE e.project_id=p.id) AS episodes,(SELECT count(*) FROM assets a WHERE a.project_id=p.id) AS assets FROM projects p WHERE ($1 IS NULL OR p.user_id=$1) ORDER BY updated_at DESC`,
+    [currentAccount() ?? null],
   );
   return rows;
 }
@@ -20,6 +22,7 @@ export async function loadProject(
   id: string,
   db: DB = database(),
 ): Promise<Project> {
+  await assertProjectAccess(id);
   const row = (await db.query("SELECT * FROM projects WHERE id=$1", [id]))
     .rows[0];
   if (!row) throw new AppError("项目不存在", 404);
@@ -28,8 +31,12 @@ export async function loadProject(
     id: row.id,
     title: row.title,
     brief: row.brief,
-    style: row.style,
-    ratio: row.ratio,
+    production: (
+      await db.query(
+        "SELECT style,ratio,prompt,adaptation,revision FROM production_settings WHERE project_id=$1",
+        [id],
+      )
+    ).rows[0] as Project["production"],
     created: row.created_at,
     updated: row.updated_at,
     assets: [],
@@ -164,19 +171,16 @@ export async function saveProject(
 ) {
   if (touch) p.updated = now();
   await db.query(
-    `INSERT INTO projects(id,title,brief,style,ratio,metadata,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET title=$2,brief=$3,style=$4,ratio=$5,metadata=$6,updated_at=$8`,
+    `INSERT INTO projects(id,title,brief,metadata,created_at,updated_at,user_id) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO UPDATE SET title=$2,brief=$3,metadata=$4,updated_at=$6`,
     [
       p.id,
       p.title,
       p.brief || "",
-      p.style,
-      p.ratio,
       omit(p, [
         "id",
         "title",
         "brief",
-        "style",
-        "ratio",
+        "production",
         "assets",
         "episodes",
         "created",
@@ -184,6 +188,18 @@ export async function saveProject(
       ]),
       p.created,
       p.updated,
+      currentAccount() ?? null,
+    ],
+  );
+  await db.query(
+    "INSERT INTO production_settings(project_id,style,ratio,prompt,adaptation,revision) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(project_id) DO UPDATE SET style=$2,ratio=$3,prompt=$4,adaptation=$5,revision=$6",
+    [
+      p.id,
+      p.production.style,
+      p.production.ratio,
+      p.production.prompt,
+      p.production.adaptation,
+      p.production.revision,
     ],
   );
   for (const a of p.assets) {
@@ -402,6 +418,7 @@ export const jobFromRow = (row: Json): Job => ({
 export async function loadJob(id: string, db: DB = database()) {
   const row = (await db.query("SELECT * FROM jobs WHERE id=$1", [id])).rows[0];
   if (!row) throw new AppError("任务不存在", 404);
+  await assertProjectAccess(row.project_id);
   return jobFromRow(row);
 }
 export async function listJobs(

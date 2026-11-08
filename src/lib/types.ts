@@ -20,6 +20,7 @@ export interface Run {
   model: string;
   planning_schema: number;
   finished_at?: number;
+  production_snapshot?: ProductionSettings;
   created: number;
   steps: Record<string, Stage>;
   media: Record<string, Version[]>;
@@ -46,20 +47,27 @@ export interface Episode {
 }
 export interface Asset {
   id: string;
+  /** Per-state editable definition and adopted media version. */
+  draft_versions?: Record<string, string>;
+  adopted_versions?: Record<string, string>;
   name: string;
   kind: string;
   selected: string | null;
   versions: Json[];
   [key: string]: any;
 }
+export interface ProductionSettings {
+  style: string;
+  ratio: string;
+  prompt: string;
+  adaptation: string;
+  revision: number;
+}
 export interface Project {
   id: string;
   title: string;
   brief: string;
-  style: string;
-  creative_prompt?: string;
-  creative_spec?: import("./creative-spec").CreativeSpec;
-  ratio: string;
+  production: ProductionSettings;
   assets: Asset[];
   episodes: Episode[];
   created: number;
@@ -86,8 +94,8 @@ export const STEPS = [
 ] as const;
 export const TITLES: Record<string, string> = {
   story: "故事",
-  director: "视频方案",
-  characters: "设定集",
+  director: "分镜与资源",
+  characters: "分镜资源",
   generation: "视频生成",
   finish: "合成导出",
   complete: "结束方案",

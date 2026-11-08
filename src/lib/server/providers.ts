@@ -16,7 +16,7 @@ import {
   mediaHash,
 } from "../domain";
 import { config, ARK, textConnection } from "./settings";
-import { wanBase } from "../models";
+import { wanBase, videoReferenceLimits } from "../models";
 import { imageRequest, saveImageResponse } from "./image-provider";
 import { mediaPath, imageSource } from "./files";
 export async function providerJSON(
@@ -73,7 +73,7 @@ export async function textJSON(
   const { key, base, model, provider } = textConnection(c, role);
   assert(
     key,
-    `请先配置${role === "agent" ? "整体助手" : "文案"}所用服务的 API Key`,
+    `请先配置${role === "agent" ? "功能（流程）" : "文字"}所用服务的 API Key`,
   );
   assert(/^https?:\/\//.test(base), "文本服务地址未配置");
   assert(model, "请先配置文本模型 ID");
@@ -141,22 +141,45 @@ export async function videoPayload(
   }
   assert(quality !== "draft" || cap.draft, "模型不支持样片");
   const direction = selected(r, "director")!.content;
-  let prompt = `项目统一创作规范：\n${projectPrompt(p)}\n整段导演意图：${direction.prompt}\n本段时间表：\n${direction.beats
-    .filter((b: Json) => b.start < s.end && b.end > s.start)
-    .map(
-      (b: Json) =>
-        `${Math.max(0, b.start - s.start)}–${Math.min(s.end, b.end) - s.start}秒：${b.description}；${b.camera || ""}；${b.dialogue || ""}`,
-    )
-    .join("\n")}\n本段提示词：\n${s.prompt}`;
   const settings = selected(r, "characters");
-  if (settings?.content.world)
-    prompt += "\n统一世界观：" + JSON.stringify(settings.content.world);
+  const storyboard = direction.planning_mode === "storyboard";
+  // The compiler's segment prompt already contains the complete shot timetable.
+  // Send it once; do not append a second copy from direction.beats.
+  const timetable = storyboard
+    ? s.prompt
+    : direction.beats
+        .filter((b: Json) => b.start < s.end && b.end > s.start)
+        .map(
+          (b: Json) =>
+            `${Math.max(0, b.start - s.start)}–${Math.min(s.end, b.end) - s.start}秒：${b.description}；镜头：${b.camera || ""}；台词与旁白：${b.dialogue || "未指定"}；环境声与音效：${b.sound || "未指定"}`,
+        )
+        .join("\n");
+  const prompt = [
+    `项目创作规范：\n${projectPrompt(p)}`,
+    direction.prompt?.trim()
+      ? `整集补充要求：\n${direction.prompt.trim()}`
+      : "",
+    settings?.content.world &&
+    Object.values(settings.content.world).some(
+      (value) => typeof value === "string" && value.trim(),
+    )
+      ? `本集美术约定：\n${JSON.stringify(settings.content.world)}`
+      : "",
+    storyboard
+      ? "每个镜头区间是一段连续拍摄，只在标注的镜头边界切镜。保持相邻镜头的动作、视线、位置和道具连续。"
+      : "",
+    `镜头时间表：\n${timetable}`,
+    !storyboard && s.prompt?.trim() ? `片段补充要求：\n${s.prompt}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
   const bound = entries(r, s.id),
     boundIds = new Set(bound.map((e) => e.asset_id));
   const refs: Json[] = (s.references || []).filter(
-    (ref: Json) => ref.kind !== "character" && !boundIds.has(ref.asset_id),
+    (ref: Json) =>
+      storyboard || (ref.kind !== "character" && !boundIds.has(ref.asset_id)),
   );
-  for (const e of bound)
+  for (const e of storyboard ? [] : bound)
     for (const image of e.images?.length
       ? e.images
       : e.url
@@ -176,6 +199,9 @@ export async function videoPayload(
     const kind =
       ref.kind === "voice" ? "audio" : ref.kind === "video" ? "video" : "image";
     texts.push(`${ref.name}：${ref.description || ""}`);
+    if (ref.image?.pose === "character-sheet")
+      texts[texts.length - 1] +=
+        "（参考图为同一个角色的正面、侧面、背面与半身四视图设定板，仅用于保持角色造型一致；视频按分镜呈现单一连续画面，不复刻四区布局，不把各视图生成为多个角色）";
     if (cap.provider === "wan") {
       assert(!["audio", "video"].includes(kind), "万相不支持音视频参考");
       continue;
@@ -214,9 +240,9 @@ export async function videoPayload(
     content[0].text =
       `向后续写 @video${counts.video}，延续人物、声音与场景。\n` +
       content[0].text;
-  const limits = r.model.includes("2-5") ? [30, 10, 10] : [9, 3, 3];
+  const limits = videoReferenceLimits(r.model);
   assert(
-    ["image", "video", "audio"].every((k, i) => counts[k] <= limits[i]),
+    (["image", "video", "audio"] as const).every((k) => counts[k] <= limits[k]),
     "参考素材超过模型数量上限",
   );
   let payload: Json;
@@ -237,7 +263,7 @@ export async function videoPayload(
     if (cap.image_mode === "text")
       params.size = (
         { "16:9": "1280*720", "9:16": "720*1280", "1:1": "960*960" } as Json
-      )[p.ratio];
+      )[p.production.ratio];
     else {
       let frame = options.first_frame;
       assert(frame, "请选择首帧图片");
@@ -257,7 +283,7 @@ export async function videoPayload(
       content,
       resolution: quality === "draft" ? "480p" : "720p",
       duration: Math.ceil(s.duration),
-      ratio: s.mode === "extend" ? "adaptive" : p.ratio,
+      ratio: s.mode === "extend" ? "adaptive" : p.production.ratio,
       generate_audio: true,
       watermark: false,
     };

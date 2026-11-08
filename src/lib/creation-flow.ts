@@ -1,8 +1,13 @@
 export const CREATION_SKILLS = {
   project: {
-    title: "项目构思",
-    module: "项目基础信息、创作方向、视觉风格与统一创作规范",
+    title: "项目简介",
+    module: "项目名称与简介",
     tool: "update_project_form",
+  },
+  production: {
+    title: "制作设置",
+    module: "视频视觉风格、画幅、美术规范与改编要求",
+    tool: "update_production_form",
   },
   episode: {
     title: "分集大纲",
@@ -10,10 +15,9 @@ export const CREATION_SKILLS = {
     tool: "update_episode_form",
   },
   run: { title: "制作方案命名", module: "方案名称", tool: "update_run_form" },
-  story: { title: "故事创作", module: "故事正文", tool: "update_story_form" },
   director: {
     title: "分镜编排",
-    module: "导演意图、时间节拍与生成片段",
+    module: "导演意图与按时间排列的分镜",
     tool: "update_director_form",
   },
   beat: {
@@ -42,8 +46,8 @@ export const CREATION_SKILLS = {
     tool: "update_entry_form",
   },
   asset: {
-    title: "共享资源设定",
-    module: "资源名称与描述",
+    title: "素材设定",
+    module: "素材名称与描述",
     tool: "update_asset_form",
   },
   finish: {
@@ -54,20 +58,26 @@ export const CREATION_SKILLS = {
 } as const;
 export type CreationSkill = keyof typeof CREATION_SKILLS;
 export const isRunEditingSkill = (skill: CreationSkill) =>
-  !(["project", "episode", "run", "asset"] as CreationSkill[]).includes(skill);
+  !(
+    ["project", "production", "episode", "run", "asset"] as CreationSkill[]
+  ).includes(skill);
 export const CREATION_FLOW = [
-  { title: "项目构思", input: "一句创意、风格与画幅", skills: ["project"] },
-  { title: "分集大纲", input: "本集要讲什么", skills: ["episode", "run"] },
-  { title: "故事", input: "正文与修改意见", skills: ["story"] },
+  { title: "项目", input: "名称与简介", skills: ["project"] },
   {
-    title: "分镜与片段",
-    input: "导演意图、画面动作、运镜、台词与片段提示词",
-    skills: ["director", "beat", "segment"],
+    title: "制作设置",
+    input: "视觉风格、画幅、美术规范与改编要求",
+    skills: ["production"],
+  },
+  { title: "分集大纲", input: "本集要讲什么", skills: ["episode", "run"] },
+  {
+    title: "故事选章",
+    input: "从独立故事选择已定稿章节，保留原文快照",
+    skills: [],
   },
   {
-    title: "设定集",
-    input: "世界观与人物、场景、道具描述",
-    skills: ["settings", "world", "entry", "asset"],
+    title: "分镜与资源",
+    input: "连续时间分镜、画面动作、运镜、台词与内嵌素材引用",
+    skills: ["director", "beat", "settings", "world", "entry", "asset"],
   },
   { title: "生成与审阅", input: "参考素材、生成参数与结果选择", skills: [] },
   {

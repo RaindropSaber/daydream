@@ -1,3 +1,4 @@
+import { currentAccount } from "./account-context";
 import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -13,7 +14,8 @@ import {
   wanBase,
 } from "../models";
 export { ARK, WAN } from "../models";
-export const dataDir = () => path.resolve(process.env.DATA_DIR || "data");
+import { dataDir } from "./storage-paths";
+export { dataDir } from "./storage-paths";
 async function key() {
   const file = path.join(dataDir(), ".encryption-key");
   await fs.mkdir(dataDir(), { recursive: true, mode: 0o700 });
@@ -31,7 +33,9 @@ async function key() {
 }
 export async function config(db: DB = database()): Promise<Json> {
   const row = (
-    await db.query("SELECT encrypted FROM settings WHERE id='models'")
+    await db.query("SELECT encrypted FROM settings WHERE id=$1", [
+      currentAccount() ? `models:${currentAccount()}` : "models",
+    ])
   ).rows[0];
   let c: Json = {};
   if (row) {
@@ -45,7 +49,11 @@ export async function config(db: DB = database()): Promise<Json> {
     );
   }
   const resolved = {
-    ...c,
+    ...Object.fromEntries(
+      Object.entries(c).filter(
+        ([field]) => !/^(storyboard|resource)_(provider|model)$/.test(field),
+      ),
+    ),
     api_key: c.api_key || process.env.ARK_API_KEY || "",
     wan_api_key: c.wan_api_key || process.env.DASHSCOPE_API_KEY || "",
     wan_region: c.wan_region || process.env.WAN_REGION || "beijing",
@@ -85,8 +93,8 @@ export async function storeConfig(c: Json, db: DB = database()) {
     .map((b) => b.toString("base64"))
     .join(":");
   await db.query(
-    "INSERT INTO settings(id,encrypted) VALUES('models',$1) ON CONFLICT(id) DO UPDATE SET encrypted=$1,updated_at=CURRENT_TIMESTAMP",
-    [text],
+    "INSERT INTO settings(id,encrypted) VALUES($2,$1) ON CONFLICT(id) DO UPDATE SET encrypted=$1,updated_at=CURRENT_TIMESTAMP",
+    [text, currentAccount() ? `models:${currentAccount()}` : "models"],
   );
 }
 function validateKey(value: unknown) {
@@ -122,7 +130,8 @@ export async function updateConfig(body: Json) {
     assert(
       !(
         await db.query(
-          "SELECT 1 FROM jobs WHERE state IN ('queued','running') AND kind IN ('video','video-batch','character-image','conversation','text','characters','finish') LIMIT 1",
+          "SELECT 1 FROM jobs WHERE state IN ('queued','running') AND ($1 IS NULL OR project_id IN (SELECT id FROM projects WHERE user_id=$1)) AND kind IN ('video','video-batch','character-image','conversation','text','characters','finish') LIMIT 1",
+          [currentAccount() ?? null],
         )
       ).rowCount,
       "模型任务执行期间不能修改配置，请等待任务完成",

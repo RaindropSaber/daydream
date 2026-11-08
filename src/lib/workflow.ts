@@ -20,10 +20,17 @@ function jobStep(job: Job): string | undefined {
   return undefined;
 }
 
-export function workflowStages(run: Run, jobs: Job[]) {
+export function workflowStages(
+  run: Run,
+  jobs: Job[],
+  combineResources = false,
+) {
   const selected = (step: string) =>
     run.steps[step]?.versions.find((v) => v.id === run.steps[step].selected);
-  const segments = selected("director")?.content.segments || [];
+  const segments =
+    selected("director")?.content.planning_mode === "storyboard"
+      ? run.generation_plan?.segments || []
+      : selected("director")?.content.segments || [];
   const settings = selected("characters")?.content.characters || [];
   const validClips = segments.filter((segment: { id: string }) => {
     const clip = run.media[segment.id]?.find(
@@ -33,14 +40,14 @@ export function workflowStages(run: Run, jobs: Job[]) {
       clip && clip.content.quality !== "draft" && run.media_fresh?.[segment.id]
     );
   }).length;
-  return STEPS.map((id, index) => {
+  const stages = STEPS.map((id, index) => {
     const status = run.statuses?.[id] || "empty";
     const tasks = jobs
       .filter((job) => job.run_id === run.id && jobStep(job) === id)
       .sort((a, b) => b.created - a.created);
-    const active = tasks.find((job) =>
-      ["running", "queued"].includes(job.state),
-    );
+    const active =
+      tasks.find((job) => job.state === "running") ||
+      tasks.find((job) => job.state === "queued");
     const previous = index > 0 ? STEPS[index - 1] : undefined;
     const blocked = previous && run.statuses?.[previous] !== "approved";
     const latest = tasks[0];
@@ -67,9 +74,11 @@ export function workflowStages(run: Run, jobs: Job[]) {
         v.number > (version?.number || 0),
     );
     let detail = {
-      story: version
-        ? `${status === "approved" ? "已确认" : status === "stale" ? "待复核" : "当前稿"} v${version.number} · ${String(version.content.text || "").replace(/\s/g, "").length} 字`
-        : "故事正文与创作方向",
+      story: version?.content.source
+        ? `${version.content.source.story_title} · ${version.content.source.chapter_ids.length} 章 · 原文第 ${version.content.source.revision} 版`
+        : version
+          ? `${status === "approved" ? "已确认" : status === "stale" ? "待复核" : "当前稿"} v${version.number} · ${String(version.content.text || "").replace(/\s/g, "").length} 字`
+          : "选择本项目故事中的定稿章节",
       director: segments.length
         ? `${segments.length} 个视频片段`
         : "镜头节拍与视频片段",
@@ -91,23 +100,27 @@ export function workflowStages(run: Run, jobs: Job[]) {
     else if (newDraft)
       detail = version ? `${detail} · 有新草稿` : "已有草稿，待审阅采用";
     const action =
-      state === "running" || state === "queued"
-        ? `查看${TITLES[id]}进度`
-        : state === "failed"
-          ? `处理${TITLES[id]}任务`
-          : status === "stale"
-            ? `更新${TITLES[id]}`
-            : newDraft
-              ? `审阅${TITLES[id]}草稿`
-              : status === "draft"
-                ? id === "generation"
-                  ? "生成并采用视频"
-                  : `确认${TITLES[id]}`
-                : id === "complete"
-                  ? "结束并锁定方案"
-                  : id === "finish"
-                    ? "导出成片"
-                    : `开始${TITLES[id]}`;
+      id === "story"
+        ? status === "approved"
+          ? "查看已选章节"
+          : "选择故事章节"
+        : state === "running" || state === "queued"
+          ? `查看${TITLES[id]}进度`
+          : state === "failed"
+            ? `处理${TITLES[id]}任务`
+            : status === "stale"
+              ? `更新${TITLES[id]}`
+              : newDraft
+                ? `审阅${TITLES[id]}草稿`
+                : status === "draft"
+                  ? id === "generation"
+                    ? "生成并采用视频"
+                    : `确认${TITLES[id]}`
+                  : id === "complete"
+                    ? "结束并锁定方案"
+                    : id === "finish"
+                      ? "导出成片"
+                      : `开始${TITLES[id]}`;
     return {
       id,
       status,
@@ -119,4 +132,33 @@ export function workflowStages(run: Run, jobs: Job[]) {
       newDraft: !!newDraft,
     };
   });
+  if (!combineResources) return stages;
+  const director = stages.find((s) => s.id === "director")!;
+  const resources = stages.find((s) => s.id === "characters")!;
+  const active =
+    [director, resources].find((s) => s.state === "running") ||
+    [director, resources].find((s) => s.state === "queued");
+  const state =
+    active?.state ||
+    (director.status === "approved"
+      ? resources.state === "blocked" || resources.state === "empty"
+        ? "draft"
+        : resources.state
+      : director.state);
+  const combined = {
+    ...director,
+    state,
+    status:
+      director.status === "approved" && resources.status === "approved"
+        ? ("approved" as const)
+        : director.status === "stale" || resources.status === "stale"
+          ? ("stale" as const)
+          : ("draft" as const),
+    detail:
+      active?.detail ||
+      `${selected("director")?.content.beats?.length || 0} 镜 · ${resources.detail}`,
+  };
+  return stages
+    .filter((s) => s.id !== "characters")
+    .map((s) => (s.id === "director" ? combined : s));
 }

@@ -1,6 +1,6 @@
 "use client";
 import { stateId, stateName, resourceVersionLabel } from "@/lib/asset-state";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Plus,
   ImagePlus,
@@ -16,11 +16,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useStudio, useAction, useUnsaved } from "./context";
 import { StageToolbar, StageMoreActions } from "./stage-toolbar";
+import { useCreativeAction } from "./creative-action";
 import { FormAssistant } from "./form-assistant";
 import { Field, Choice, EditorDialog } from "./forms";
 import { VersionBar, VersionActions, useVersion } from "./editor";
 import { StatusBadge, Empty, kindNames, date } from "./common";
 import type { Json, Run } from "@/lib/types";
+import { videoCardState } from "@/lib/video-state";
+import { workflowStages } from "@/lib/workflow";
 const worldNames: Record<string, string> = {
   premise: "时代与世界观",
   technology: "科技与能源",
@@ -36,8 +39,9 @@ const setting = (r: Run) =>
   r.steps.characters.versions.find((v) => v.id === r.steps.characters.selected)
     ?.content;
 export function SettingsEditor() {
+  const creativeAction = useCreativeAction();
   const editor = useVersion("characters");
-  const { run: r, mutate, confirm, jobs, project: p } = useStudio();
+  const { run: r, mutate, confirm, jobs, project: p, navigate } = useStudio();
   const [edit, setEdit] = useState<Json | null>(null);
   const [draft, setDraft] = useState<Json | null>(null);
   useEffect(() => {
@@ -57,7 +61,7 @@ export function SettingsEditor() {
     (c: Json) => !c.images?.length && !c.url,
   );
   const generateAll = () =>
-    confirm({
+    creativeAction({
       title: "生成设定图",
       description: `将${adopted ? "使用当前版本" : "采用当前草稿并"}补齐 ${missing.length} 项设定图，调用 Seedream 并按供应商实际计费。`,
       label: "开始生成",
@@ -87,7 +91,7 @@ export function SettingsEditor() {
             onClick={() => setEdit({ type: "bind" })}
           >
             <Plus />
-            从资源库添加
+            从素材库添加
           </Button>
           <Button
             disabled={
@@ -200,6 +204,19 @@ export function SettingsEditor() {
                         {kindNames[c.kind || "character"]}
                       </Badge>
                     </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        navigate("assets", {
+                          project: p!.id,
+                          asset: c.asset_id,
+                          state: stateId(c),
+                        })
+                      }
+                    >
+                      在素材库审阅与采用候选
+                    </Button>
                     {images.length ? (
                       <div className="flex gap-3">
                         {images.map((i: Json) => (
@@ -276,7 +293,7 @@ export function SettingsEditor() {
                         variant="outline"
                         disabled={!adopted || !ready || working}
                         onClick={() =>
-                          confirm({
+                          creativeAction({
                             title:
                               job?.state === "failed" && images.length
                                 ? "继续生成设定图"
@@ -530,10 +547,54 @@ function SettingDialog({
   );
 }
 export function Generation() {
+  const creativeAction = useCreativeAction();
   const { run: r, jobs, mutate, confirm } = useStudio();
   const { action, busy } = useAction();
+  const attemptedPlan = useRef("");
+  const [planningError, setPlanningError] = useState("");
+  const storyboard = !!r && plan(r)?.planning_mode === "storyboard";
+  const planFresh =
+    !storyboard ||
+    (r?.generation_plan?.director_version === r?.steps.director.selected &&
+      r?.generation_plan?.resource_version === r?.steps.characters.selected &&
+      r?.generation_plan?.model === r?.model);
+  const basis = r
+    ? `${r.id}:${r.steps.director.selected}:${r.steps.characters.selected}:${r.model}`
+    : "";
+  const compile = () =>
+    action(async () => {
+      setPlanningError("");
+      try {
+        await mutate("compile-video-plan");
+      } catch (error) {
+        setPlanningError(
+          error instanceof Error ? error.message : "片段组合失败",
+        );
+        throw error;
+      }
+    });
+  useEffect(() => {
+    if (
+      storyboard &&
+      !planFresh &&
+      !r?.finished_at &&
+      r?.statuses?.director === "approved" &&
+      r?.statuses?.characters === "approved" &&
+      !jobs.some(
+        (j) =>
+          j.run_id === r.id &&
+          ["video", "video-batch"].includes(j.kind) &&
+          ["queued", "running"].includes(j.state),
+      ) &&
+      attemptedPlan.current !== basis
+    ) {
+      attemptedPlan.current = basis;
+      void compile();
+    }
+  }, [basis, storyboard, planFresh]);
   if (!r) return null;
-  const list = plan(r)?.segments || [],
+  const list =
+      (storyboard ? r.generation_plan?.segments : plan(r)?.segments) || [],
     working = jobs.some(
       (j) =>
         j.run_id === r.id &&
@@ -542,14 +603,24 @@ export function Generation() {
     ),
     ready =
       r.statuses?.characters === "approved" &&
-      r.statuses?.director === "approved";
+      r.statuses?.director === "approved" &&
+      planFresh;
   const batch = jobs.find((j) => j.run_id === r.id && j.kind === "video-batch");
+  const generationState = workflowStages(r, jobs).find(
+    (stage) => stage.id === "generation",
+  )!.state;
   return (
     <div className="space-y-5">
       <StageToolbar
         meta={
           <>
-            <StatusBadge value={r.statuses?.generation || "empty"} />{" "}
+            <StatusBadge
+              value={
+                ["running", "queued", "failed"].includes(generationState)
+                  ? generationState
+                  : r.statuses?.generation || "empty"
+              }
+            />{" "}
             <p className="text-sm text-muted-foreground">
               {
                 list.filter(
@@ -561,12 +632,21 @@ export function Generation() {
           </>
         }
       >
+        {storyboard && (
+          <Button
+            variant="outline"
+            disabled={busy || working || !!r.finished_at}
+            onClick={() => void compile()}
+          >
+            重新组合片段
+          </Button>
+        )}
         <Button
           disabled={!ready || working || busy || !list.length}
           onClick={() =>
             void action(async () => {
               const preview = await mutate("preview-video-batch");
-              confirm({
+              creativeAction({
                 title: "生成整集视频",
                 description: `预计新增 ${preview.new_count} 段、${preview.new_seconds} 秒，复用 ${preview.reuse_count} 段。新增片段按所选供应商实际计费。`,
                 label: "开始生成",
@@ -610,9 +690,14 @@ export function Generation() {
                 variant="outline"
                 disabled={busy || working}
                 onClick={() =>
-                  void action(() =>
-                    mutate("resume-video-batch", { job_id: batch.id }),
-                  )
+                  creativeAction({
+                    title: "继续未完成视频片段",
+                    description:
+                      "保留已完成候选，继续这批尚未完成的片段，按供应商实际计费。",
+                    label: "继续生成",
+                    action: () =>
+                      mutate("resume-video-batch", { job_id: batch.id }),
+                  })
                 }
               >
                 继续未完成片段
@@ -621,6 +706,22 @@ export function Generation() {
           </div>
         )}
       </StageToolbar>
+      {storyboard && (
+        <div className="space-y-2 rounded-lg border bg-muted/20 p-3 text-sm">
+          <p>
+            {busy
+              ? "正在按模型能力组合分镜…"
+              : planFresh
+                ? `已自动组合 ${list.length} 个生成片段，优先减少调用次数；每段已包含分镜和实际传入的参考资源。`
+                : "分镜、资源或模型已变化，请重新组合片段。"}
+          </p>
+          {planningError && (
+            <p role="alert" className="text-destructive">
+              {planningError}
+            </p>
+          )}
+        </div>
+      )}
       {batch && (
         <Card className="shadow-none">
           <CardContent className="flex flex-wrap items-center justify-between gap-4 pt-6">
@@ -657,6 +758,7 @@ function VideoCard({
   working: boolean;
   ready: boolean;
 }) {
+  const creativeAction = useCreativeAction();
   const { run: r, jobs, mutate, confirm } = useStudio();
   const versions = r!.media[s.id] || [],
     adopted = r!.media_selection[s.id];
@@ -668,13 +770,7 @@ function VideoCard({
     versions.find((v) => v.id === id) ||
     versions.find((v) => v.id === adopted) ||
     versions.at(-1);
-  const job = jobs.find(
-    (j) =>
-      j.run_id === r!.id &&
-      j.kind === "video" &&
-      j.segment_id === s.id &&
-      ["queued", "running", "failed"].includes(j.state),
-  );
+  const { state, job } = videoCardState(r!, jobs, s.id, v?.id);
   const { action, busy } = useAction();
   const [options, setOptions] = useState(false);
   return (
@@ -688,23 +784,27 @@ function VideoCard({
             src={v.content.url}
           />
         ) : (
-          <div className="grid h-full place-items-center text-sm text-slate-400">
-            暂无视频
+          <div
+            className="flex h-full flex-col items-center justify-center gap-3 text-sm text-slate-400"
+            role="status"
+          >
+            {state === "running" && (
+              <LoaderCircle className="size-6 animate-spin motion-reduce:animate-none" />
+            )}
+            {state === "running"
+              ? "视频生成中"
+              : state === "queued"
+                ? "等待生成视频"
+                : state === "failed"
+                  ? "视频生成失败"
+                  : "暂无视频"}
           </div>
         )}
       </div>
       <CardContent className="space-y-4 pt-5">
         <div className="flex justify-between gap-3">
           <h3 className="font-medium">{s.title}</h3>
-          <StatusBadge
-            value={
-              adopted
-                ? r!.media_fresh?.[s.id]
-                  ? "approved"
-                  : "stale"
-                : "empty"
-            }
-          />
+          <StatusBadge value={state} />
         </div>
         <p className="text-xs text-muted-foreground">
           {s.start}–{s.end} 秒 · {s.duration} 秒
@@ -763,7 +863,7 @@ function VideoCard({
             variant="outline"
             disabled={!ready || working || busy}
             onClick={() =>
-              confirm({
+              creativeAction({
                 title: "生成视频",
                 description: `生成「${s.title}」，${Math.ceil(s.duration)} 秒、720P。使用当前视频模型并按供应商实际计费，结果保存为新候选。`,
                 label: "提交生成",
@@ -788,6 +888,25 @@ function VideoCard({
         <details className="text-xs text-muted-foreground">
           <summary className="cursor-pointer">提示词与参考</summary>
           <p className="mt-3 whitespace-pre-wrap leading-6">{s.prompt}</p>
+          {!!s.beat_ids?.length && (
+            <p className="mt-2">包含分镜：{s.beat_ids.join("、")}</p>
+          )}
+          {!!s.references?.length && (
+            <div className="mt-3 flex flex-wrap gap-3">
+              {s.references.map((ref: Json, index: number) => (
+                <div key={index} className="w-24 space-y-1">
+                  {ref.image?.url && (
+                    <img
+                      src={ref.image.url}
+                      alt={ref.name}
+                      className="h-20 w-24 rounded border object-contain"
+                    />
+                  )}
+                  <p>{ref.name}</p>
+                </div>
+              ))}
+            </div>
+          )}
         </details>
       </CardContent>
       {options && (
@@ -816,14 +935,19 @@ function VideoOptions({
   const [audio, setAudio] = useState(
     current.audio === false ? "false" : "true",
   );
-  const images = (setting(r!)?.characters || [])
-    .filter((c: Json) => c.segment_ids.includes(s.id))
-    .flatMap((c: Json) =>
-      (c.images || []).map((i: Json) => [
-        i.file,
-        `${c.name} · ${i.pose || "参考图"}`,
-      ]),
-    );
+  const images =
+    plan(r!)?.planning_mode === "storyboard"
+      ? (s.references || [])
+          .filter((ref: Json) => ref.image)
+          .map((ref: Json) => [ref.image.file || ref.image.url, ref.name])
+      : (setting(r!)?.characters || [])
+          .filter((c: Json) => c.segment_ids.includes(s.id))
+          .flatMap((c: Json) =>
+            (c.images || []).map((i: Json) => [
+              i.file,
+              `${c.name} · ${i.pose || "参考图"}`,
+            ]),
+          );
   const { action, busy } = useAction();
   return (
     <EditorDialog
@@ -871,8 +995,12 @@ function VideoOptions({
   );
 }
 export function Finish() {
+  const creativeAction = useCreativeAction();
   const { run: r, mutate, confirm, jobs } = useStudio();
-  const list = plan(r!)?.segments || [];
+  const list =
+    (plan(r!)?.planning_mode === "storyboard"
+      ? r!.generation_plan?.segments
+      : plan(r!)?.segments) || [];
   const defaults = () =>
     list.map((s: Json) => ({
       segment_id: s.id,
@@ -992,14 +1120,20 @@ export function Finish() {
                 setDirty(false);
               };
               if (caption !== "none")
-                confirm({
+                creativeAction({
                   title: "导出字幕成片",
                   description:
                     "字幕处理会将实际音频发送到火山方舟，并按音频模型实际计费。",
                   label: "开始导出",
                   action: submit,
                 });
-              else void action(submit);
+              else
+                creativeAction({
+                  title: "导出成片",
+                  description: "使用当前片段顺序、裁切和输出规格合成成片。",
+                  label: "开始导出",
+                  action: submit,
+                });
             }}
           >
             {working ? (

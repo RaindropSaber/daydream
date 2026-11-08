@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import {
   MessageCircle,
   Minus,
@@ -38,12 +37,19 @@ export function Assistant() {
   const session = conversations.find((s) => s.id === activeId);
   const target = session?.target;
   const sending = useRef(new Set<string>());
-  const query = useSearchParams();
+  const { route } = studio;
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const { busy, action } = useAction();
   const viewport = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const run = studio.run;
+  const mediaJobs = studio.jobs
+    .filter(
+      (job) =>
+        job.project_id === studio.project?.id && job.kind !== "conversation",
+    )
+    .sort((a, b) => b.created - a.created)
+    .slice(0, 5);
   const messages = run ? conversationTimeline(run) : [];
   const value = session ? session.value : run ? drafts[run.id] || "" : "";
   const latestJob = studio.jobs
@@ -109,7 +115,7 @@ export function Assistant() {
         token: `@asset:${asset.id}`,
         label: asset.name,
         kind: "asset" as const,
-        description: `共享资源 · ${asset.kind}`,
+        description: `素材库 · ${asset.kind}`,
       })) || []),
     ],
     [run?.id, studio.project?.assets],
@@ -153,7 +159,11 @@ export function Assistant() {
             episode_id: studio.episode?.id,
             run_id: run?.id,
           },
-        target && before && !before.disabled
+        target &&
+          target.skill !== "story" &&
+          target.skill !== "operation" &&
+          before &&
+          !before.disabled
           ? {
               skill: target.skill,
               form: { ...before.form, ...pending },
@@ -175,7 +185,15 @@ export function Assistant() {
       sending.current.add(session.id);
       void (async () => {
         try {
-          const result = await api("/api/studio/assistant", request);
+          if (target?.request && (!before || applyUnavailable))
+            throw new Error("原内容已关闭或暂不可编辑，请返回后重新发起对话");
+          const result =
+            target?.request && before
+              ? await target.request(
+                  { ...before, form: { ...before.form, ...pending } },
+                  sent,
+                )
+              : await api("/api/studio/assistant", request);
           update(session.id, (s) => ({
             ...s,
             messages: [
@@ -232,9 +250,9 @@ export function Assistant() {
         run_id: runId,
         step: "assistant",
         page_context:
-          query.get("view") === "episode"
-            ? query.get("step") || "story"
-            : query.get("view") || "home",
+          route.view === "episode"
+            ? route.step || "story"
+            : route.view || "home",
         message: sent.trim(),
       });
       setDrafts((old) => (old[runId] === sent ? { ...old, [runId]: "" } : old));
@@ -243,7 +261,9 @@ export function Assistant() {
   };
 
   return (
-    <div className="fixed bottom-3 right-3 z-[60] sm:bottom-4 sm:right-4">
+    <div
+      className={`fixed right-3 z-[60] sm:right-4 ${!open && route.view === "episode" && route.step === "director" ? "bottom-40" : "bottom-3 sm:bottom-4"}`}
+    >
       {open && (
         <section
           id="creative-assistant"
@@ -311,6 +331,26 @@ export function Assistant() {
           >
             {session ? (
               <>
+                {target?.activity}
+                {target?.skill === "operation" && mediaJobs.length > 0 && (
+                  <div
+                    className="space-y-2 rounded-lg border bg-muted/30 p-3 text-sm"
+                    role="status"
+                  >
+                    {mediaJobs.map((job) => (
+                      <p key={job.id}>
+                        {job.state === "done"
+                          ? "已完成"
+                          : job.state === "failed"
+                            ? "失败"
+                            : job.state === "running"
+                              ? "执行中"
+                              : "排队中"}{" "}
+                        · {job.message || job.kind}
+                      </p>
+                    ))}
+                  </div>
+                )}
                 {session.messages.map((m) => (
                   <article
                     key={m.id}
@@ -356,7 +396,11 @@ export function Assistant() {
                     {m.patch && (
                       <div className="space-y-3 rounded-lg border p-3">
                         <div className="flex items-center justify-between gap-2">
-                          <p className="text-sm font-medium">生成结果</p>
+                          <p className="text-sm font-medium">
+                            {m.skill === "operation"
+                              ? "待执行任务"
+                              : "生成结果"}
+                          </p>
                           {target && m.skill === target.skill && (
                             <Button
                               type="button"
@@ -365,7 +409,7 @@ export function Assistant() {
                               disabled={
                                 m.applied || session.busy || applyUnavailable
                               }
-                              onClick={() => {
+                              onClick={async () => {
                                 if (
                                   !targets.includes(target) ||
                                   !matchesDraft(target.snapshot(), m.before)
@@ -375,16 +419,39 @@ export function Assistant() {
                                   );
                                   return;
                                 }
-                                target.apply(m.patch!);
                                 update(session.id, (s) => ({
                                   ...s,
-                                  messages: s.messages.map((item) =>
-                                    item.id === m.id
-                                      ? { ...item, applied: true }
-                                      : item,
-                                  ),
+                                  busy: true,
+                                  error: "",
                                 }));
-                                toast.success("已应用，请检查后保存");
+                                try {
+                                  await target.apply(m.patch!);
+                                  update(session.id, (s) => ({
+                                    ...s,
+                                    messages: s.messages.map((item) =>
+                                      item.id === m.id
+                                        ? { ...item, applied: true }
+                                        : item,
+                                    ),
+                                  }));
+                                  toast.success(
+                                    target.appliedMessage ||
+                                      "已应用，请检查后保存",
+                                  );
+                                } catch (e) {
+                                  update(session.id, (s) => ({
+                                    ...s,
+                                    error:
+                                      e instanceof Error
+                                        ? e.message
+                                        : "应用失败，请重试",
+                                  }));
+                                } finally {
+                                  update(session.id, (s) => ({
+                                    ...s,
+                                    busy: false,
+                                  }));
+                                }
                               }}
                             >
                               {m.applied ? (
@@ -393,12 +460,22 @@ export function Assistant() {
                                   已应用
                                 </>
                               ) : (
-                                "应用"
+                                target.applyLabel || "应用"
                               )}
                             </Button>
                           )}
                         </div>
-                        <DraftPreview value={m.patch} />
+                        <DraftPreview
+                          value={
+                            m.skill === "operation"
+                              ? Object.fromEntries(
+                                  Object.entries(m.patch).filter(
+                                    ([key]) => key !== "operation_id",
+                                  ),
+                                )
+                              : m.patch
+                          }
+                        />
                         {target &&
                           m.skill === target.skill &&
                           !targets.includes(target) && (
@@ -507,12 +584,12 @@ const fieldNames: Record<string, string> = {
   title: "名称",
   name: "名称",
   text: "故事正文",
-  brief: "创作方向 / 剧情",
+  brief: "简介 / 剧情",
   description: "描述",
   prompt: "提示词",
-  style: "风格",
   ratio: "画幅",
-  creative_prompt: "创作规范",
+  adaptation: "改编要求",
+  style: "视觉风格",
   intent: "导演意图",
   beats: "镜头节拍",
   segments: "生成片段",
@@ -526,6 +603,22 @@ const fieldNames: Record<string, string> = {
   out: "结束时间",
   duration: "时长",
   target_duration: "预设时长（秒）",
+  premise: "故事核心",
+  genre: "题材",
+  theme: "主题",
+  outline: "全书主线",
+  novel: "长篇方案",
+  idea: "故事想法",
+  target_words: "目标字数",
+  chapter_words: "每章字数",
+  ending: "全书结局",
+  volumes: "分卷计划",
+  start: "起始章节",
+  end: "结束章节",
+  goal: "本卷目标",
+  climax: "高潮",
+  resolution: "阶段结局",
+  count: "写作章数",
   location: "场景",
   action: "动作",
 };

@@ -162,9 +162,6 @@ export function CreateDialog({
   const [values, setValues] = useState<Json>({
     title: "",
     brief: "",
-    style: "电影写实",
-    creative_prompt: "",
-    ratio: "16:9",
     name: "",
     kind: "character",
     description: "",
@@ -178,11 +175,12 @@ export function CreateDialog({
   const set = (k: string, v: string) =>
     setValues((old) => ({ ...old, [k]: v }));
   const editingProject = type === "project" && !!projectId;
+  const editingEpisode = type === "episode" && !!initial?.episode_id;
   const titles = {
-    project: editingProject ? "编辑基础信息" : "新建项目",
-    episode: "新建分集",
+    project: editingProject ? "编辑项目" : "新建项目",
+    episode: editingEpisode ? "编辑分集" : "新建分集",
     run: "新建制作方案",
-    asset: initial?.asset_id ? "编辑资源" : "新增资源",
+    asset: initial?.asset_id ? "编辑素材" : "新增素材",
   };
   return (
     <EditorDialog
@@ -193,10 +191,19 @@ export function CreateDialog({
         void action(async () => {
           let data;
           if (editingProject) {
-            data = await mutate("project-settings", values);
+            data = await mutate("project-settings", {
+              title: values.title,
+              brief: values.brief,
+              base_updated: values.base_updated,
+            });
+          } else if (editingEpisode) {
+            data = await mutate("episode-settings", values);
           } else if (type === "project") {
             const { api } = await import("./context");
-            data = await api("/api/studio/projects", values);
+            data = await api("/api/studio/projects", {
+              title: values.title,
+              brief: values.brief,
+            });
             await refresh();
           } else
             data = await mutate(
@@ -220,13 +227,13 @@ export function CreateDialog({
               onChange={(e) => set("title", e.target.value)}
             />
           </Field>
-          <Field label={type === "project" ? "创作方向" : "本集剧情"}>
+          <Field label={type === "project" ? "项目简介" : "本集剧情"}>
             <Textarea
               rows={4}
               maxLength={10000}
               disabled={busy}
               value={values.brief}
-              aria-label="创作方向"
+              aria-label={type === "project" ? "项目简介" : "本集剧情"}
               onChange={(e) => set("brief", e.target.value)}
             />
           </Field>
@@ -252,56 +259,10 @@ export function CreateDialog({
           />
         </Field>
       )}
-      {type === "project" && (
-        <div className="grid grid-cols-2 gap-4">
-          <Field label="风格">
-            <Input
-              aria-label="风格"
-              list="project-style-presets"
-              maxLength={100}
-              disabled={busy}
-              value={values.style}
-              onChange={(e) => set("style", e.target.value)}
-              placeholder="选择预设或输入自定义风格"
-            />
-            <datalist id="project-style-presets">
-              {STYLE_PRESETS.map((style) => (
-                <option key={style} value={style} />
-              ))}
-            </datalist>
-          </Field>
-          <Field label="画幅">
-            <Choice
-              label="画幅"
-              disabled={busy}
-              value={values.ratio}
-              onChange={(v) => set("ratio", v)}
-              options={{ "16:9": "16:9", "9:16": "9:16", "1:1": "1:1" }}
-            />
-          </Field>
-        </div>
-      )}
-      {type === "project" && (
-        <Field label="项目创作规范（可选）">
-          <Textarea
-            aria-label="项目创作规范"
-            placeholder="整体风格、世界观、美术要求等"
-            rows={4}
-            maxLength={12000}
-            value={values.creative_prompt}
-            onChange={(e) => set("creative_prompt", e.target.value)}
-          />
-        </Field>
-      )}
-      {editingProject && (
-        <p className="text-xs leading-6 text-muted-foreground">
-          修改创作方向、风格、画幅或规范后，进行中的方案会标记为待更新；已结束方案保留原有结果。
-        </p>
-      )}
       <FormAssistant
         skill={type}
         projectId={projectId}
-        label={editingProject ? "AI 完善基础信息" : "AI 生成"}
+        label={editingProject ? "AI 完善项目简介" : "AI 生成"}
         form={values}
         disabled={busy}
         onApply={(patch) => setValues((old) => ({ ...old, ...patch }))}
@@ -321,7 +282,7 @@ export function CreateDialog({
               value={values.inherit}
               onChange={(v) => set("inherit", v)}
               options={{
-                story: "继承当前故事",
+                story: "继承当前选章",
                 all: "复制全部内容与采用结果",
                 empty: "空白方案",
               }}
@@ -344,7 +305,7 @@ export function CreateDialog({
               <Input
                 required
                 maxLength={100}
-                aria-label="资源名称"
+                aria-label="素材名称"
                 value={values.name}
                 onChange={(e) => set("name", e.target.value)}
               />
@@ -375,6 +336,95 @@ export function CreateDialog({
           </Field>
         </>
       )}
+    </EditorDialog>
+  );
+}
+
+export function ProductionSettingsDialog({ onClose }: { onClose: () => void }) {
+  const { project, mutate } = useStudio();
+  const { busy, action } = useAction();
+  const [values, setValues] = useState({ ...project!.production });
+  const set = (key: string, value: string) =>
+    setValues((old) => ({ ...old, [key]: value }));
+  return (
+    <EditorDialog
+      title="制作设置"
+      busy={busy}
+      onClose={onClose}
+      onSubmit={() =>
+        void action(async () => {
+          await mutate("production-settings", {
+            style: values.style,
+            ratio: values.ratio,
+            prompt: values.prompt,
+            adaptation: values.adaptation,
+            base_revision: values.revision,
+          });
+          onClose();
+        })
+      }
+    >
+      <p className="text-sm leading-6 text-muted-foreground">
+        统一当前项目的视频表现方式。剧情和人物设定来自「故事创作」中已选用的章节。
+      </p>
+      <div className="grid grid-cols-2 gap-4">
+        <Field label="视觉风格">
+          <Input
+            required
+            disabled={busy}
+            aria-label="视觉风格"
+            list="video-style-presets"
+            maxLength={100}
+            value={values.style}
+            onChange={(e) => set("style", e.target.value)}
+          />
+          <datalist id="video-style-presets">
+            {STYLE_PRESETS.map((style) => (
+              <option key={style} value={style} />
+            ))}
+          </datalist>
+        </Field>
+        <Field label="画幅">
+          <Choice
+            label="画幅"
+            value={values.ratio}
+            disabled={busy}
+            onChange={(value) => set("ratio", value)}
+            options={{ "16:9": "16:9", "9:16": "9:16", "1:1": "1:1" }}
+          />
+        </Field>
+      </div>
+      <Field label="美术规范">
+        <Textarea
+          disabled={busy}
+          aria-label="美术规范"
+          maxLength={12000}
+          value={values.prompt}
+          onChange={(e) => set("prompt", e.target.value)}
+          placeholder="画面质感、配色、光线、服装与场景的美术表达，以及需要避免的视觉元素。"
+        />
+      </Field>
+      <Field label="改编要求">
+        <Textarea
+          disabled={busy}
+          aria-label="改编要求"
+          maxLength={12000}
+          value={values.adaptation}
+          onChange={(e) => set("adaptation", e.target.value)}
+          placeholder="如何把原文拍成视频，例如叙事视角、节奏、旁白使用与需要保留的情节。"
+        />
+      </Field>
+      <p className="text-xs leading-6 text-muted-foreground">
+        修改后，进行中的视频方案需要复核；已结束方案保留原结果。故事正文与已选原文不会被修改。
+      </p>
+      <FormAssistant
+        skill="production"
+        projectId={project!.id}
+        label="AI 完善制作设置"
+        form={values}
+        disabled={busy}
+        onApply={(patch) => setValues((old) => ({ ...old, ...patch }))}
+      />
     </EditorDialog>
   );
 }

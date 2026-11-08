@@ -1,16 +1,32 @@
 "use client";
-import { useState, useEffect, useCallback, useRef } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import type { AuthUser } from "@/lib/auth-types";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  createContext,
+  useContext,
+} from "react";
+import { AccountHeader } from "./account-header";
+import { useRouter } from "next/navigation";
+import {
+  studioPath,
+  type StudioRoute,
+  type StudioView,
+  type NavigationParams,
+} from "@/lib/studio-routes";
 import {
   ChevronDown,
   Check,
-  FolderKanban,
-  Settings2,
   ArrowLeft,
-  Library,
+  BookOpenText,
+  Images,
+  type LucideIcon,
   History,
   Clapperboard,
   LoaderCircle,
+  Pencil,
   Plus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -30,11 +46,13 @@ import {
   useConfirm,
 } from "./context";
 import { Projects, ProjectSettings, Assets, Jobs } from "./management";
+import { StoryWorkspace } from "./stories";
 import { StoryEditor, PlanEditor } from "./editor";
 import { FormAssistantProvider } from "./form-assistant";
 import { Assistant } from "./assistant";
 import { Models } from "./models";
 import { WorkflowPipeline } from "./workflow-pipeline";
+import { StoryboardEditor } from "./storyboard-editor";
 import { StageWorkspace } from "./stage-toolbar";
 import { CompleteScheme } from "./complete-scheme";
 import { SettingsEditor, Generation, Finish } from "./production";
@@ -42,22 +60,41 @@ import { CreateDialog, Choice } from "./forms";
 import { Heading, StatusBadge } from "./common";
 import { cn } from "@/lib/utils";
 import { episodeDisplayRun } from "@/lib/project-overview";
-import { STEPS, TITLES, type Project, type Json, type Job } from "@/lib/types";
-export default function StudioApp() {
+import { workflowStages } from "@/lib/workflow";
+import {
+  STEPS,
+  TITLES,
+  DEFAULT_EPISODE_DURATION,
+  type Project,
+  type Json,
+  type Job,
+} from "@/lib/types";
+const AccountContext = createContext<AuthUser>({
+  id: "",
+  username: "",
+  avatarUrl: "",
+  role: "member",
+});
+export function StudioProviders({
+  children,
+  user,
+}: {
+  children: React.ReactNode;
+  user: AuthUser;
+}) {
   return (
-    <ConfirmationProvider>
-      <FormAssistantProvider>
-        <Workspace />
-      </FormAssistantProvider>
-    </ConfirmationProvider>
+    <AccountContext.Provider value={user}>
+      <ConfirmationProvider>
+        <FormAssistantProvider>{children}</FormAssistantProvider>
+      </ConfirmationProvider>
+    </AccountContext.Provider>
   );
 }
-function Workspace() {
-  const router = useRouter(),
-    query = useSearchParams();
+export default function StudioApp({ route }: { route: StudioRoute }) {
+  const router = useRouter();
+  const user = useContext(AccountContext);
   const confirm = useConfirm();
-  const pid = query.get("project"),
-    current = query.get("view") || (pid ? "overview" : "home");
+  const { project: pid, view: current } = route;
   const [summary, setSummary] = useState<Json>({
     projects: [],
     config: {},
@@ -112,19 +149,13 @@ function Workspace() {
     window.addEventListener("beforeunload", handle);
     return () => window.removeEventListener("beforeunload", handle);
   }, [dirty]);
-  const navigate = useCallback(
-    (view: string, params: Json = {}) => {
+  const navigateTo = useCallback(
+    (url: string, options?: { saved?: boolean }) => {
       const go = () => {
         setDirty(false);
-        const q = new URLSearchParams({
-          view,
-          ...Object.fromEntries(
-            Object.entries(params).map(([k, v]) => [k, String(v)]),
-          ),
-        });
-        router.push("/?" + q.toString());
+        router.push(url);
       };
-      if (dirty)
+      if (dirty && !options?.saved)
         confirm({
           title: "放弃未保存的修改？",
           description: "离开后，当前未保存的编辑将丢失。",
@@ -135,15 +166,30 @@ function Workspace() {
     },
     [router, dirty, confirm],
   );
+  const navigate = useCallback(
+    (
+      view: StudioView,
+      params: NavigationParams = {},
+      options?: { saved?: boolean },
+    ) => navigateTo(studioPath(view, params), options),
+    [navigateTo],
+  );
   const p = data?.project || null;
   const episode = p?.episodes.find(
-    (e) => e.id === (query.get("episode") || p.episodes[0]?.id),
+    (e) => e.id === (route.episode || p.episodes[0]?.id),
   );
   const run = episode
-    ? query.get("run")
-      ? episode.runs.find((r) => r.id === query.get("run"))
+    ? route.run
+      ? episode.runs.find((r) => r.id === route.run)
       : episodeDisplayRun(episode)
     : undefined;
+  const stages = run ? workflowStages(run, data?.jobs || []) : [];
+  const progress =
+    stages.find((stage) => ["running", "queued"].includes(stage.state)) ||
+    stages.find((stage) => stage.status !== "approved");
+  const step =
+    route.step || (run?.finished_at ? "complete" : progress?.id || "story");
+  const resolvedRoute = { ...route, step };
   const mutate = useCallback(
     async (action: string, body: Json = {}) => {
       if (!p) throw Error("请先选择项目");
@@ -158,14 +204,16 @@ function Workspace() {
     [p, episode?.id, run?.id, load],
   );
   const scoped = !!p && current !== "home";
-  const sublinks = [
-    { view: "overview", title: "项目概览", Icon: FolderKanban },
-    { view: "assets", title: "共享资源", Icon: Library },
+  const sublinks: { view: StudioView; title: string; Icon: LucideIcon }[] = [
+    { view: "overview", title: "视频制作", Icon: Clapperboard },
+    { view: "story-workspace", title: "故事创作", Icon: BookOpenText },
+    { view: "assets", title: "素材库", Icon: Images },
     { view: "jobs", title: "任务记录", Icon: History },
   ];
   return (
     <StudioContext.Provider
       value={{
+        route: resolvedRoute,
         project: p,
         episode,
         run,
@@ -180,11 +228,29 @@ function Workspace() {
         confirm,
       }}
     >
-      <div className="h-dvh overflow-hidden bg-background">
+      <div className="flex h-dvh flex-col overflow-hidden bg-background">
+        <AccountHeader
+          user={user}
+          onHome={() => navigate("home")}
+          onModels={() => navigate("models")}
+          onProjects={() => navigateTo("/workspace")}
+          onAccount={() => navigateTo("/account")}
+          onAdmin={() => navigateTo("/admin")}
+          onLogout={(action) => {
+            if (dirty)
+              confirm({
+                title: "退出并放弃未保存的修改？",
+                description: "退出后，当前未保存的编辑将丢失。",
+                label: "退出登录",
+                action,
+              });
+            else void action();
+          }}
+        />
         {scoped && (
           <aside
             aria-label="项目工作台侧栏"
-            className="fixed inset-y-0 left-0 z-20 flex w-16 flex-col border-r bg-card px-2 py-5 sm:w-56 sm:px-4"
+            className="fixed bottom-0 top-12 left-0 z-20 flex w-16 flex-col border-r bg-card px-2 py-5 sm:w-56 sm:px-4"
           >
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -237,10 +303,7 @@ function Workspace() {
               {sublinks.map(({ view, title, Icon }) => {
                 const active =
                   current === view ||
-                  (view === "overview" &&
-                    ["project-settings", "project", "episode"].includes(
-                      current,
-                    ));
+                  (view === "overview" && ["episode"].includes(current));
                 return (
                   <button
                     key={view}
@@ -258,69 +321,14 @@ function Workspace() {
                 );
               })}
             </nav>
-            <div className="mt-4 shrink-0 space-y-1 border-t pt-3">
-              <button
-                aria-label="我的项目"
-                onClick={() => navigate("home")}
-                className="flex w-full items-center justify-center gap-3 rounded-lg px-3 py-3 text-sm text-muted-foreground transition hover:bg-muted sm:justify-start"
-              >
-                <FolderKanban className="size-4 shrink-0" />
-                <span className="hidden sm:inline">我的项目</span>
-              </button>
-              <button
-                aria-label="模型管理"
-                aria-current={current === "models" ? "page" : undefined}
-                onClick={() =>
-                  navigate("models", scoped ? { project: p.id } : {})
-                }
-                className={cn(
-                  "flex w-full items-center justify-center gap-3 rounded-lg px-3 py-3 text-sm text-muted-foreground transition hover:bg-muted sm:justify-start",
-                  current === "models" && "bg-primary/7 text-primary",
-                )}
-              >
-                <Settings2 className="size-4 shrink-0" />
-                <span className="hidden sm:inline">模型管理</span>
-              </button>
-            </div>
           </aside>
         )}
         <div
           className={cn(
-            "flex h-full min-w-0 flex-col",
+            "flex min-h-0 min-w-0 flex-1 flex-col",
             scoped && "ml-16 sm:ml-56",
           )}
         >
-          {!scoped && (
-            <header className="flex h-12 shrink-0 items-center gap-3 border-b bg-card px-4 lg:px-6">
-              <button
-                onClick={() => navigate("home")}
-                aria-label="Daydream 我的项目"
-                className="flex items-center gap-2 text-sm font-semibold"
-              >
-                <Clapperboard className="size-4 text-primary" />
-                Daydream
-              </button>
-              {current !== "home" ? (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => navigate("home")}
-                >
-                  我的项目
-                </Button>
-              ) : (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="ml-auto"
-                  onClick={() => navigate("models")}
-                >
-                  <Settings2 className="size-4" />
-                  模型管理
-                </Button>
-              )}
-            </header>
-          )}
           <main
             className={cn(
               "mx-auto min-h-0 w-full max-w-[1800px] flex-1",
@@ -345,25 +353,28 @@ function Workspace() {
               </Card>
             ) : current === "home" ? (
               <Projects projects={summary.projects} />
+            ) : current === "story-workspace" && p ? (
+              <StoryWorkspace
+                key={p.id}
+                projectId={p.id}
+                initialIdea={p.brief}
+              />
             ) : current === "models" ? (
               <Models />
             ) : !p ? (
               <p className="text-sm text-muted-foreground">项目不存在</p>
-            ) : ["overview", "project-settings", "project"].includes(
-                current,
-              ) ? (
+            ) : current === "overview" ? (
               <ProjectSettings key={p.id} />
             ) : current === "assets" ? (
               <Assets />
             ) : current === "jobs" ? (
               <Jobs />
+            ) : !episode || !run ? (
+              <p role="alert" className="text-sm text-muted-foreground">
+                分集或制作方案不存在
+              </p>
             ) : (
-              <Workflow
-                key={run?.id || "empty"}
-                step={
-                  query.get("step") || (run?.finished_at ? "complete" : "story")
-                }
-              />
+              <Workflow key={run?.id || "empty"} step={step} />
             )}
           </main>
         </div>
@@ -385,9 +396,15 @@ function Workflow({ step }: { step: string }) {
     setDirty,
   } = useContextStudio();
   const [newScheme, setNewScheme] = useState(false);
+  const [editEpisode, setEditEpisode] = useState(false);
   if (!r || !e || !p)
     return <p className="text-sm text-muted-foreground">请先添加分集。</p>;
-  const current = STEPS.includes(step as any) ? step : "story";
+  const current =
+    step === "characters"
+      ? "director"
+      : STEPS.includes(step as any)
+        ? step
+        : "story";
   const previous = (
     {
       director: "story",
@@ -440,7 +457,7 @@ function Workflow({ step }: { step: string }) {
           onClick={() => navigate("overview", { project: p.id })}
         >
           <ArrowLeft className="size-3.5" />
-          返回项目概览
+          返回视频制作
         </Button>
         <span
           className="min-w-0 truncate text-muted-foreground"
@@ -468,6 +485,16 @@ function Workflow({ step }: { step: string }) {
                   >
                     {e.title}
                   </h1>
+                  <Button
+                    size="icon-xs"
+                    variant="ghost"
+                    disabled={!!e.locked_at}
+                    aria-label="编辑分集"
+                    title="编辑分集"
+                    onClick={() => setEditEpisode(true)}
+                  >
+                    <Pencil className="size-3.5" />
+                  </Button>
                   <Button
                     size="icon-xs"
                     variant="ghost"
@@ -527,6 +554,13 @@ function Workflow({ step }: { step: string }) {
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
                       disabled={!!e.locked_at}
+                      onSelect={() => setEditEpisode(true)}
+                    >
+                      <Pencil className="size-4" />
+                      编辑分集
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={!!e.locked_at}
                       onSelect={() => setNewScheme(true)}
                     >
                       <Plus className="size-4" />
@@ -560,7 +594,7 @@ function Workflow({ step }: { step: string }) {
             tabIndex={0}
             className={cn(
               "min-h-0 flex-1 p-4 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring lg:p-5",
-              current === "story"
+              ["story", "director"].includes(current)
                 ? "flex flex-col overflow-hidden"
                 : "overflow-y-auto overscroll-contain",
             )}
@@ -611,7 +645,7 @@ function Workflow({ step }: { step: string }) {
                 <fieldset
                   disabled={!!e.locked_at || !!r.finished_at}
                   className={
-                    current === "story"
+                    ["story", "director"].includes(current)
                       ? "flex min-h-0 min-w-0 flex-1 flex-col"
                       : "min-w-0"
                   }
@@ -623,7 +657,7 @@ function Workflow({ step }: { step: string }) {
                   {current === "story" ? (
                     <StoryEditor key={r.id + current} />
                   ) : current === "director" ? (
-                    <PlanEditor key={r.id + current} />
+                    <StoryboardEditor key={r.id + current} />
                   ) : current === "characters" ? (
                     <SettingsEditor key={r.id + current} />
                   ) : current === "generation" ? (
@@ -637,6 +671,23 @@ function Workflow({ step }: { step: string }) {
           </div>
         </StageWorkspace>
       </div>
+      {editEpisode && !e.locked_at && (
+        <CreateDialog
+          type="episode"
+          initial={{
+            episode_id: e.id,
+            title: e.title,
+            brief: e.brief,
+            target_duration: e.target_duration ?? DEFAULT_EPISODE_DURATION,
+            base_episode: {
+              title: e.title,
+              brief: e.brief,
+              target_duration: e.target_duration ?? DEFAULT_EPISODE_DURATION,
+            },
+          }}
+          onClose={() => setEditEpisode(false)}
+        />
+      )}
       {newScheme && !e.locked_at && (
         <CreateDialog
           type="run"

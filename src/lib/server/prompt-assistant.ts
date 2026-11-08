@@ -1,6 +1,12 @@
 import { CREATION_SKILLS, type CreationSkill } from "../creation-flow";
 import { mentionedSkills } from "../assistant-mentions";
-import { assert, type Json } from "../domain";
+import { assert, locate, requireStep, type Json } from "../domain";
+import {
+  normalizePlan,
+  normalizeSettings,
+  registerSettings,
+  validate,
+} from "./validation";
 import { loadProject } from "./repository";
 import { creationReadTools } from "./creation-context";
 import {
@@ -46,8 +52,40 @@ export async function assistPrompt(body: Json) {
       name: CREATION_SKILLS[candidate].tool,
       description: `按用户要求为${CREATION_SKILLS[candidate].module}生成或修改待应用结果卡片，不保存、不采用。`,
       parameters: FORM_SCHEMAS[candidate],
-      execute(value: Json) {
+      async execute(value: Json) {
         assert(Object.keys(value).length, "助手返回了空修改");
+        // Module cards must satisfy the same constraints as saving the form.
+        // Standalone chats can still use a completed scheme as read context.
+        if (
+          source?.skill === candidate &&
+          ["director", "settings"].includes(candidate)
+        ) {
+          assert(
+            scope.project_id && scope.episode_id && scope.run_id,
+            "请先选择分集与制作方案",
+          );
+          const p = await loadProject(scope.project_id);
+          const { e, r } = locate(p, scope.episode_id, scope.run_id);
+          assert(
+            !e.locked_at && !r.finished_at,
+            "此方案已结束，请新建方案后编辑",
+          );
+          requireStep(p, r, candidate === "director" ? "story" : "director");
+          if (candidate === "settings") {
+            // Resolve identities from an earlier, still-unsaved result card in
+            // this local copy only. Preparing a follow-up must not save assets.
+            registerSettings(
+              p,
+              e.id,
+              validate(r, "characters", structuredClone(source.form)),
+            );
+          }
+          const content = { ...source.form, ...value };
+          value =
+            candidate === "director"
+              ? normalizePlan(p, r, content)
+              : normalizeSettings(p, r, content);
+        }
         patch = value;
         skill = candidate;
       },
@@ -66,7 +104,10 @@ export async function assistPrompt(body: Json) {
       parameters: {
         type: "object",
         properties: {
-          skill: { type: "string", enum: Object.keys(CREATION_SKILLS) },
+          skill: {
+            type: "string",
+            enum: Object.keys(CREATION_SKILLS),
+          },
         },
         required: ["skill"],
         additionalProperties: false,

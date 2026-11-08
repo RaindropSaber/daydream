@@ -16,7 +16,9 @@ import {
   inputs,
   selected,
 } from "../src/lib/domain";
-const source = path.resolve(process.argv[2] || "data/studio.sqlite3");
+const source = path.resolve(
+  process.argv[2] || path.join(dataDir(), "studio.sqlite3"),
+);
 await migrate();
 await fs.mkdir(path.join(dataDir(), "backups"), {
   recursive: true,
@@ -73,6 +75,25 @@ const report = {
   unverified_media: 0,
 };
 for (const p of projects) {
+  p.production = {
+    style: p.style,
+    ratio: p.ratio,
+    prompt: [
+      p.creative_prompt || "",
+      ...Object.entries(p.creative_spec || {}).map(
+        ([key, value]) => `${key}：${value}`,
+      ),
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    adaptation: "",
+    revision: p.config_revision || 0,
+  };
+  delete p.style;
+  delete p.ratio;
+  delete p.creative_prompt;
+  delete p.creative_spec;
+  delete p.config_revision;
   report.assets += p.assets.length;
   for (const e of p.episodes) {
     report.episodes++;

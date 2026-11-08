@@ -1,7 +1,6 @@
 "use client";
 import { stateFields, resourceVersionLabel } from "@/lib/asset-state";
 import { useState, useEffect } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, Trash2, Check, Save } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -22,8 +21,8 @@ import {
   type Asset,
 } from "@/lib/types";
 export function useVersion(step: string) {
-  const { run: r, mutate, navigate, project, episode } = useStudio();
-  const requested = useSearchParams().get("version");
+  const { run: r, mutate, navigate, project, episode, route } = useStudio();
+  const requested = route.version;
   const versions = (r?.steps[step]?.versions || []).filter(
     (v) => step !== "director" || Array.isArray(v.content.segments),
   );
@@ -214,153 +213,7 @@ export function VersionActions({
     </div>
   );
 }
-export function StoryEditor() {
-  const editor = useVersion("story");
-  const { project, episode, run, mutate } = useStudio();
-  const router = useRouter();
-  const [text, setText] = useState(editor.v?.content.text || "");
-  useEffect(() => setText(editor.v?.content.text || ""), [editor.v?.id]);
-  const approved =
-    !editor.dirty &&
-    editor.v?.id === editor.current &&
-    run?.statuses?.story === "approved";
-  const stale =
-    !editor.dirty &&
-    editor.v?.id === editor.current &&
-    run?.statuses?.story === "stale";
-  const state = editor.dirty
-    ? "未保存"
-    : approved
-      ? "已确认"
-      : stale
-        ? "需重新确认"
-        : editor.v
-          ? editor.v.approved
-            ? "历史版本"
-            : "草稿已保存"
-          : "未开始";
-  const nextLabel = approved ? "进入视频方案" : "确认并继续";
-  const next = () =>
-    router.push(
-      "/?" +
-        new URLSearchParams({
-          view: "episode",
-          project: project!.id,
-          episode: episode!.id,
-          run: run!.id,
-          step: "director",
-        }).toString(),
-    );
-  const confirmStory = () => {
-    if (approved) {
-      next();
-      return;
-    }
-    void editor.action(async () => {
-      await mutate("confirm-story", {
-        content: { text },
-        version_id: editor.v?.id,
-        expected_selected: editor.current || null,
-        basis_revision: run?.project_config_revision || 0,
-      });
-      editor.setDirty(false);
-      toast.success("小说已确认，进入视频方案");
-      next();
-    });
-  };
-  return (
-    <Card className="min-h-0 min-w-0 flex-1 gap-0 overflow-hidden py-0 shadow-none">
-      <FormAssistant
-        dock
-        key={`story-${editor.v?.id || "new"}`}
-        skill="story"
-        form={{ text }}
-        disabled={editor.busy}
-        compactToolbar
-        toolbarStart={
-          <div className="flex items-center gap-1 [&_[data-slot=select-trigger]]:h-8 [&_[data-slot=select-trigger]]:px-2 [&>div>div]:w-16">
-            <VersionBar step="story" editor={editor} compact />
-            <Badge
-              variant="secondary"
-              className={
-                approved
-                  ? "bg-emerald-50 px-1.5 text-[10px] text-emerald-700"
-                  : "px-1.5 text-[10px]"
-              }
-              title={state}
-              aria-label={state}
-              aria-live="polite"
-            >
-              {state === "草稿已保存"
-                ? "草稿"
-                : state === "需重新确认"
-                  ? "待复核"
-                  : state === "历史版本"
-                    ? "历史稿"
-                    : state}
-            </Badge>
-          </div>
-        }
-        toolbarEnd={
-          <div className="flex items-center gap-1">
-            <Button
-              size="sm"
-              variant="outline"
-              title={
-                editor.dirty ? "保存草稿，不影响已确认版本" : "没有未保存的修改"
-              }
-              aria-label="保存草稿"
-              className="px-2 xl:px-3"
-              disabled={editor.busy || !editor.dirty || !text.trim()}
-              onClick={() => void editor.save({ text })}
-            >
-              <Save className="size-4" />
-              <span className="sr-only xl:not-sr-only">保存草稿</span>
-            </Button>
-            <Button
-              size="sm"
-              title={
-                editor.dirty
-                  ? "保存当前修改并确认，进入视频方案"
-                  : stale
-                    ? "复核当前稿件后重新确认，进入视频方案"
-                    : nextLabel
-              }
-              aria-label={nextLabel}
-              className="px-2 xl:px-3"
-              disabled={editor.busy || !text.trim()}
-              onClick={confirmStory}
-            >
-              <Check className="hidden size-4 xl:block" />
-              <span className="xl:hidden">
-                {editor.busy ? "处理中" : approved ? "下一步" : "确认"}
-              </span>
-              <span className="hidden xl:inline">
-                {editor.busy ? "处理中…" : nextLabel}
-              </span>
-            </Button>
-          </div>
-        }
-        onApply={(patch) => {
-          setText(patch.text);
-          editor.setDirty(patch.text !== (editor.v?.content.text || ""));
-        }}
-      />
-      <CardContent className="min-h-0 flex-1 p-0">
-        <Textarea
-          className="h-full min-h-0 field-sizing-fixed resize-none overflow-y-auto overscroll-contain rounded-none rounded-b-xl border-0 p-6 text-sm leading-8 shadow-none focus-visible:ring-0"
-          aria-label="故事正文"
-          placeholder="编写故事正文，或通过对话整理草稿"
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            editor.setDirty(e.target.value !== (editor.v?.content.text || ""));
-          }}
-        />
-      </CardContent>
-    </Card>
-  );
-}
+export { StorySelection as StoryEditor } from "./stories";
 
 export function PlanEditor() {
   const editor = useVersion("director");
@@ -822,7 +675,7 @@ function References({
           </div>
         ))
       ) : (
-        <p className="text-sm text-muted-foreground">暂无共享资源</p>
+        <p className="text-sm text-muted-foreground">暂无素材</p>
       )}
     </EditorDialog>
   );

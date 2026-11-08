@@ -42,7 +42,7 @@ try {
     mode: 0o600,
     flag: "wx",
   });
-  await migrate();
+  await migrate("001_initial.sql");
   await transaction(async (db) => {
     for (const table of tables) {
       if ((await db.query(`SELECT 1 FROM ${table} LIMIT 1`)).rowCount)
@@ -73,6 +73,7 @@ try {
     if ((await db.query("PRAGMA foreign_key_check")).rowCount)
       throw new Error("外键校验失败，已回滚");
   });
+  await migrate();
   console.log(
     JSON.stringify(
       {

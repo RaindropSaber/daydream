@@ -49,7 +49,7 @@ export function validate(r: Run, step: string, c: Json): Json {
         Array.isArray(c.beats) &&
         c.beats.length >= 1 &&
         c.beats.length <= 200,
-      "方案需要导演意图和时间节拍",
+      "请提供有效的拍摄要求字段（可留空）和分镜时间表",
     );
     let end = 0;
     const seen = new Set<string>();
@@ -64,13 +64,30 @@ export function validate(r: Run, step: string, c: Json): Json {
         "节拍需从0秒连续排列，ID不能重复",
       );
       assert(
-        ["description", "camera", "dialogue"].every(
+        ["description", "camera", "dialogue", "sound"].every(
           (k) => typeof (b[k] ?? "") === "string",
         ),
         "节拍描述需为文本",
       );
       seen.add(b.id);
       end = b.end;
+    }
+    if (c.planning_mode === "storyboard") {
+      assert(
+        c.beats.every(
+          (b: Json) =>
+            typeof b.description === "string" && b.description.trim(),
+        ),
+        "请填写每镜画面内容",
+      );
+      c.beats = c.beats.map((beat: Json) => ({
+        id: beat.id,
+        start: beat.start,
+        end: beat.end,
+        description: beat.description,
+      }));
+      c.segments = [];
+      return c;
     }
     validate(r, "segments", c);
     assert(
@@ -153,12 +170,17 @@ export function validate(r: Run, step: string, c: Json): Json {
       "设定最多60项",
     );
     if (c.world) c.world = validateWorld(c.world);
-    const ids = new Set(segments(r).map((s) => s.id));
+    const ids = new Set(
+      (selected(r, "director")?.content.planning_mode === "storyboard"
+        ? selected(r, "director")!.content.beats
+        : segments(r)
+      ).map((s: Json) => s.id),
+    );
     const seen = new Set<string>();
     for (const e of c.characters) {
       assert(
         typeof e.asset_id === "string" &&
-          !seen.has(e.asset_id + ":" + stateId(e)) &&
+          !seen.has(e.binding_id || e.asset_id + ":" + stateId(e)) &&
           ["character", "scene", "prop"].includes(e.kind || "character"),
         "设定类型或ID无效",
       );
@@ -204,7 +226,7 @@ export function validate(r: Run, step: string, c: Json): Json {
             "同一片段不能使用同一资源的多个状态",
           );
       }
-      seen.add(e.asset_id + ":" + stateId(e));
+      seen.add(e.binding_id || e.asset_id + ":" + stateId(e));
     }
     return c;
   }
@@ -265,7 +287,7 @@ export function registerSettings(p: Project, eid: string, c: Json) {
       };
       p.assets.push(a);
     }
-    if (!a.versions.some((v) => v.id === entry.version))
+    if (!a.versions.some((v) => v.id === entry.version)) {
       a.versions.push({
         id: entry.version,
         number: a.versions.length + 1,
@@ -279,6 +301,11 @@ export function registerSettings(p: Project, eid: string, c: Json) {
         created: now(),
         source: "conversation",
       });
+      a.draft_versions = {
+        ...a.draft_versions,
+        [stateId(entry)]: entry.version,
+      };
+    }
     a.selected ??= entry.version;
   }
 }

@@ -1,3 +1,5 @@
+import { currentAccount } from "./account-context";
+import { database } from "./db";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { assert, type Json } from "../domain";
@@ -11,6 +13,22 @@ export async function mediaPath(file: string, mustExist = true) {
   );
   const target = path.resolve(base, file);
   assert(target.startsWith(base + path.sep), "媒体路径无效");
+  const account = currentAccount();
+  const filename = path.relative(base, target);
+  if (account) {
+    if (!mustExist)
+      await database().query(
+        "INSERT INTO media_owners(filename,user_id) VALUES($1,$2) ON CONFLICT(filename) DO NOTHING",
+        [filename, account],
+      );
+    const owner = (
+      await database().query(
+        "SELECT user_id FROM media_owners WHERE filename=$1",
+        [filename],
+      )
+    ).rows[0];
+    assert(owner?.user_id === account, "媒体不存在");
+  }
   if (mustExist) {
     const real = await fs.realpath(target);
     assert(real.startsWith(base + path.sep), "媒体路径无效");

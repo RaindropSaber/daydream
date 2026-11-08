@@ -13,6 +13,7 @@ export const labels: Record<string, string> = {
   running: "处理中",
   done: "已完成",
   failed: "失败",
+  candidate: "待采用",
 };
 export function StatusBadge({ value }: { value: string }) {
   return (

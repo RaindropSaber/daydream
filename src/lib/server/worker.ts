@@ -1,3 +1,6 @@
+import { inProjectAccount } from "./account-context";
+import { assetImageSpec } from "../asset-images";
+import { startNovelWorker } from "./novel";
 import {
   runCreationAgent,
   skillInstructions,
@@ -59,62 +62,61 @@ import { imageRequest } from "./image-provider";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let stopped = false;
 function outputShape(step: string, r: Run) {
-  return step === "story"
-    ? { text: "完整故事正文" }
-    : step === "director"
-      ? {
-          prompt: "统一导演意图",
-          beats: [
-            {
-              id: "B1",
-              start: 0,
-              end: 10,
-              description: "画面与动作",
-              camera: "运镜",
-              dialogue: "台词",
-            },
-          ],
-          segments: [
-            {
-              id: "S1",
-              title: "片段名称",
-              start: 0,
-              end: 10,
-              prompt: "完整提示词",
-              beat_ids: ["B1"],
-              asset_ids: [],
-              mode: "reference",
-              depends_on: [],
-            },
-          ],
-        }
-      : {
-          world: {
-            premise: "",
-            technology: "",
-            visual_language: "",
-            palette: "",
-            materials: "",
-            avoid: "",
+  return step === "director"
+    ? {
+        prompt: "统一导演意图",
+        beats: [
+          {
+            id: "B1",
+            start: 0,
+            end: 10,
+            description: "画面与动作",
+            camera: "运镜",
+            dialogue: "台词",
           },
-          characters: [
-            {
-              asset_id: "已有资源ID；新增留空",
-              version: "已有资源版本ID；新增留空",
-              kind: "character/scene/prop",
-              name: "名称",
-              description: "完整具体设定",
-              reason: "收录依据",
-              appearance_changed: true,
-              new_state: false,
-              state_name: "剧情状态名称（新增状态时填写）",
-              tags: [],
-              segment_ids: segments(r).map((s) => s.id),
-            },
-          ],
-        };
+        ],
+        segments: [
+          {
+            id: "S1",
+            title: "片段名称",
+            start: 0,
+            end: 10,
+            prompt: "完整提示词",
+            beat_ids: ["B1"],
+            asset_ids: [],
+            mode: "reference",
+            depends_on: [],
+          },
+        ],
+      }
+    : {
+        world: {
+          premise: "",
+          technology: "",
+          visual_language: "",
+          palette: "",
+          materials: "",
+          avoid: "",
+        },
+        characters: [
+          {
+            asset_id: "已有资源ID；新增留空",
+            version: "已有资源版本ID；新增留空",
+            kind: "character/scene/prop",
+            name: "名称",
+            description: "完整具体设定",
+            reason: "收录依据",
+            appearance_changed: true,
+            new_state: false,
+            state_name: "剧情状态名称（新增状态时填写）",
+            tags: [],
+            segment_ids: segments(r).map((s) => s.id),
+          },
+        ],
+      };
 }
 async function textTask(j: Job) {
+  assert(j.step !== "story", "视频中的故事只能从本项目的故事选择章节");
   const {
     project: p,
     episode: e,
@@ -129,9 +131,10 @@ async function textTask(j: Job) {
     episode: e.title,
     episode_brief: e.brief,
     target_duration: e.target_duration ?? null,
-    style: p.style,
-    project_creative_spec: projectPrompt(p),
-    ratio: p.ratio,
+    style: p.production.style,
+    production_settings: p.production,
+    production_prompt: projectPrompt(p),
+    ratio: p.production.ratio,
     assets: p.assets,
     approved_story:
       status(p, r, "story") === "approved"
@@ -161,7 +164,6 @@ async function textTask(j: Job) {
       exports: r.exports,
     },
     available_draft_targets: [
-      "story",
       ...(status(p, r, "story") === "approved" ? ["director"] : []),
       ...(status(p, r, "director") === "approved" ? ["characters"] : []),
     ],
@@ -171,7 +173,7 @@ async function textTask(j: Job) {
     },
     output_shape: unified
       ? Object.fromEntries(
-          ["story", "director", "characters"].map((stage) => [
+          ["director", "characters"].map((stage) => [
             stage,
             outputShape(stage, r),
           ]),
@@ -192,13 +194,14 @@ async function textTask(j: Job) {
       context.conversation.filter((m) => m.role === "user"),
     );
     const instructions = await Promise.all(
-      ["story", "director", "settings"].map((skill) =>
-        skillInstructions(skill as "story" | "director" | "settings"),
+      ["director", "settings"].map((skill) =>
+        skillInstructions(skill as "director" | "settings"),
       ),
     );
     const response = await runCreationAgent({
+      role: "agent",
       instructions:
-        "这是贯穿各创作阶段的同一段对话。阅读 conversation 的完整历史以及 stages 的采用稿和最新草稿，current_page 只是参考。用户讨论时直接回答，明确要求生成或修改时选择 target_step 并调用 save_stage_draft 工具。只能处理 available_draft_targets 内的阶段，一次只保存一份待采用草稿。不得执行生图、视频生成或导出。\n" +
+        "视频中的故事只能从本项目的故事选择定稿章节，禁止生成或改写故事正文。需要创作故事时引导用户进入故事创作。这里负责视频改编制作。这是贯穿各创作阶段的同一段对话。阅读 conversation 的完整历史以及 stages 的采用稿和最新草稿，current_page 只是参考。用户讨论时直接回答，明确要求生成或修改时选择 target_step 并调用 save_stage_draft 工具。只能处理 available_draft_targets 内的阶段，一次只保存一份待采用草稿。不得执行生图、视频生成或导出。\n" +
         instructions.join("\n") +
         "\n" +
         mentions.instructions,
@@ -261,7 +264,7 @@ async function textTask(j: Job) {
   const target = unified ? value.target_step : step;
   if (value.proposal != null) {
     assert(
-      ["story", "director", "characters"].includes(target),
+      ["director", "characters"].includes(target),
       "草稿缺少有效的目标阶段",
     );
     if (target === "director") requireStep(p, r, "story");
@@ -269,9 +272,7 @@ async function textTask(j: Job) {
     value.proposal =
       target === "characters"
         ? normalizeSettings(p, r, value.proposal)
-        : target === "director"
-          ? normalizePlan(p, r, value.proposal)
-          : validate(r, "story", value.proposal);
+        : normalizePlan(p, r, value.proposal);
   }
   if (!conversation) assert(value.proposal, "模型没有返回完整草稿");
   return value;
@@ -365,46 +366,33 @@ async function imageTask(j: Job) {
     "生图服务地域或业务空间已变更，请恢复提交时配置",
   );
   const e = j.snapshot.entry;
-  const poses: Record<string, string[][]> = {
-    character: [
-      ["portrait", "正面半身定妆，面部和发型清晰"],
-      ["fullbody", "完整全身造型，与参考图同一人物、面容和服装结构"],
-    ],
-    scene: [
-      ["establishing", "16:9场景空间全景，清晰布局和地标，无前景人物"],
-      ["detail", "同一空间关键区域和材质细节，保持建筑、科技设施与光线一致"],
-    ],
-    prop: [
-      [
-        "object",
-        "关键道具完整三分之四视角，呈现结构、比例、材质与符号，中性背景",
-      ],
-    ],
-  };
-  j.images ??= [];
+  const spec = assetImageSpec(e.kind || "character");
+  assert(spec, "该资源类型不支持生成设定图");
+  const { pose, direction, label } = spec;
+  j.images = (j.images || [])
+    .filter((image: Json) => image.pose === pose)
+    .slice(0, 1);
   j.attempted_poses ??= [];
-  for (const [pose, direction] of poses[e.kind || "character"]) {
-    if (j.images.some((i: Json) => i.pose === pose)) continue;
-    assert(
-      !j.attempted_poses.includes(pose),
-      "此图上次提交结果不确定，请先核对控制台，勿重复生成",
-    );
-    const refs = e.reference_images || e.images || [];
-    const ref = j.images[0] || refs[0];
-    const reference = ref ? await imageSource(ref) : e.url || undefined;
-    j.message = `正在生成 ${e.name} · ${direction}`;
-    j.attempted_poses.push(pose);
-    await saveJob(j);
-    const prompt = `${j.snapshot.project_prompt || ""}\n项目创作方向：${j.snapshot.project_brief}。渲染风格：${j.snapshot.style}。统一世界观与美术规范：${JSON.stringify(j.snapshot.world)}。导演视觉要求：${j.snapshot.direction}。设定：${e.name}，剧情状态：${e.state_name || "初始状态"}，${e.description}。${direction}。具体体现时代、科技结构、材质与工艺，保持身份和结构，不添加剧情、能力或武器。不要拼图或额外文字。`;
-    const image = await generateImage(
-      j.image_model,
-      prompt,
-      `character-${j.id}-${pose}.jpg`,
-      reference,
-    );
-    j.images.push({ ...image, pose });
-    await saveJob(j);
-  }
+  if (j.images.length) return { images: j.images };
+  assert(
+    !j.attempted_poses.includes(pose),
+    "此图上次提交结果不确定，请先核对控制台，勿重复生成",
+  );
+  const refs = e.reference_images?.length ? e.reference_images : e.images || [];
+  const ref = refs[0];
+  const reference = ref ? await imageSource(ref) : e.url || undefined;
+  j.message = `正在生成 ${e.name} · ${label}`;
+  j.attempted_poses.push(pose);
+  await saveJob(j);
+  const prompt = `任务：制作单项资源的独立设定图。目标资源：${e.name}，类型：${e.kind || "character"}。本次构图要求优先于参考资料中的剧情、镜头与动作描述。\n\n【风格与世界观参考资料】\n${j.snapshot.project_prompt || ""}\n渲染风格：${j.snapshot.style}。统一世界观与美术规范：${JSON.stringify(j.snapshot.world)}。\n以上资料用于保持美术、配色和材质一致，其中的故事及镜头内容不作为本次构图要求。\n\n【目标资源自身外观】\n${e.name}，剧情状态：${e.state_name || "初始状态"}，${e.description}。\n描述中提及的其他主体及互动仅用于理解设定，不把它们一起画入独立设定图。\n\n【本次必须执行的出图要求】\n${direction}。${j.snapshot.generation_note ? `本次调整要求（不得改变资源类型及视图布局）：${j.snapshot.generation_note}。` : ""}若有参考图，仅参考目标资源的身份、造型、材质和配色，重新按本次要求构图。具体体现时代、科技结构、材质与工艺，不添加剧情、能力或武器。严格遵守本次要求的视图数量与布局，只输出一张图片。`;
+  const image = await generateImage(
+    j.image_model,
+    prompt,
+    `character-${j.id}-${pose}.jpg`,
+    reference,
+  );
+  j.images.push({ ...image, pose });
+  await saveJob(j);
   return { images: j.images };
 }
 async function applyImage(
@@ -423,39 +411,14 @@ async function applyImage(
     id: uid(),
     number: asset.versions.length + 1,
     images: result.images,
+    definition_id: original.definition_id || original.id,
+    generation_note: j.snapshot.generation_note || "",
     url: "",
     created: now(),
     source: imageProvider(j.image_model) === "wan" ? "qwen-image" : "seedream",
   };
   asset.versions.push(av);
-  if (asset.selected === original.id) asset.selected = av.id;
-  const current = r ? selected(r, "characters") : undefined;
-  if (
-    r &&
-    current &&
-    !current.approved &&
-    digest(current.inputs) === digest(j.inputs)
-  ) {
-    const content = copy(current.content);
-    const target = content.characters.find(
-      (c: Json) => digest(c) === j.entry_hash,
-    );
-    if (target) {
-      target.version = av.id;
-      target.images = result.images;
-      target.url = "";
-      j.result_version = addVersion(
-        r,
-        "characters",
-        content,
-        p,
-        imageProvider(j.image_model) === "wan" ? "qwen-image" : "seedream",
-        true,
-        false,
-        current.inputs,
-      ).id;
-    }
-  }
+  j.asset_version = av.id;
   j.result_url = result.images[0].url;
 }
 async function saveVideoResult(j: Job, result: Json) {
@@ -562,6 +525,9 @@ async function batchTask(j: Job) {
   return { results: j.results };
 }
 export async function executeJob(j: Job) {
+  return inProjectAccount(j.project_id, () => executeAccountJob(j));
+}
+async function executeAccountJob(j: Job) {
   const project = await loadProject(j.project_id);
   assert(
     j.kind === "asset-image" ||
@@ -700,6 +666,7 @@ export async function startWorker() {
     return true;
   });
   if (!locked) return async () => {};
+  const stopNovelWorker = await startNovelWorker();
   let running: Promise<void> | null = null;
   async function tick() {
     if (stopped || running) return;
@@ -753,6 +720,7 @@ export async function startWorker() {
     stopped = true;
     clearInterval(timer);
     // Retain ownership until in-flight work has settled, even during shutdown.
+    await stopNovelWorker();
     if (running) await running;
     await database().query(
       "DELETE FROM runtime_locks WHERE name='worker' AND token=$1",

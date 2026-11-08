@@ -23,6 +23,7 @@ const ToolbarSlots = createContext<{
   meta: HTMLFieldSetElement | null;
   actions: HTMLFieldSetElement | null;
   locked: boolean;
+  footer: HTMLDivElement | null;
 } | null>(null);
 
 // Each stage owns its state and handlers; only their DOM position moves into
@@ -38,8 +39,9 @@ export function StageWorkspace({
 }) {
   const [meta, setMeta] = useState<HTMLFieldSetElement | null>(null);
   const [actions, setActions] = useState<HTMLFieldSetElement | null>(null);
+  const [footer, setFooter] = useState<HTMLDivElement | null>(null);
   return (
-    <ToolbarSlots.Provider value={{ meta, actions, locked }}>
+    <ToolbarSlots.Provider value={{ meta, actions, locked, footer }}>
       <section
         aria-label={`${title}工作区`}
         className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card"
@@ -64,6 +66,10 @@ export function StageWorkspace({
           />
         </div>
         {children}
+        <div
+          ref={setFooter}
+          className="shrink-0 border-t bg-card empty:hidden"
+        />
       </section>
     </ToolbarSlots.Provider>
   );
@@ -89,6 +95,13 @@ export function StageToolbar({
       {slots.actions && children && createPortal(children, slots.actions)}
     </>
   );
+}
+
+// Footer content lives outside the workspace's scrolling content area.
+export function StageFooter({ children }: { children: ReactNode }) {
+  const slots = useContext(ToolbarSlots);
+  if (!slots) return <div>{children}</div>;
+  return slots.footer ? createPortal(children, slots.footer) : null;
 }
 
 type ActionElement = ReactElement<{ children?: ReactNode; disabled?: boolean }>;

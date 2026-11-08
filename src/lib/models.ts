@@ -56,3 +56,12 @@ export function imageProvider(model: string): "ark" | "wan" | undefined {
   if (!Object.hasOwn(IMAGE_MODELS, model)) return undefined;
   return model.startsWith("qwen-image-") ? "wan" : "ark";
 }
+
+// Keep planning constraints aligned with the payload adapter.
+export function videoReferenceLimits(model: string) {
+  if (model === "wan2.6-t2v") return { image: 0, video: 0, audio: 0 };
+  if (model.startsWith("wan")) return { image: 1, video: 0, audio: 0 };
+  return model.includes("2-5")
+    ? { image: 30, video: 10, audio: 10 }
+    : { image: 9, video: 3, audio: 3 };
+}

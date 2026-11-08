@@ -1,6 +1,9 @@
+import { adoptedAssetVersion } from "../asset-library";
+import { saveAssetDefinition, mutateAssetLibrary } from "./asset-library";
+import { storySource } from "./stories";
+import { dialogueText } from "../storyboard";
 import { stateId, stateFields } from "../asset-state";
-import { validateCreativeSpec } from "./creative-spec";
-import { projectPrompt, projectCreativeText } from "../creative-spec";
+import { projectPrompt } from "../creative-spec";
 import {
   type Project,
   type Run,
@@ -24,6 +27,7 @@ import {
   PROFILES,
   requireStep,
   status,
+  generationPlanFresh,
   view,
 } from "../domain";
 import { DEFAULT_EPISODE_DURATION } from "../types";
@@ -51,6 +55,7 @@ import { imageSource } from "./files";
 import { videoPayload } from "./providers";
 import { wanBase } from "../models";
 import { imageRequest } from "./image-provider";
+import { compileStoryboard, resourceKey } from "./segment-planner";
 export async function index() {
   return {
     projects: await listProjects(),
@@ -122,8 +127,7 @@ export async function queueImages(
       snapshot: {
         entry: copy(c),
         world: copy(selected(r, "characters")!.content.world || {}),
-        style: p.style,
-        project_brief: p.brief,
+        style: p.production.style,
         project_prompt: projectPrompt(p),
         direction: selected(r, "director")?.content.prompt || "",
       },
@@ -136,6 +140,7 @@ export async function queueImages(
   }
 }
 export async function videoDetails(p: Project, e: Episode, r: Run, b: Json) {
+  assert(generationPlanFresh(r), "分镜或资源已变化，请先重新组合生成片段");
   requireStep(p, r, "director");
   requireStep(p, r, "characters");
   const s = segments(r).find((s) => s.id === b.segment_id);
@@ -164,9 +169,12 @@ export async function videoDetails(p: Project, e: Episode, r: Run, b: Json) {
 export function batchBasis(p: Project, r: Run, cfg: Json) {
   return {
     model: r.model,
-    ratio: p.ratio,
+    ratio: p.production.ratio,
     plan: selected(r, "director")?.id,
     settings: selected(r, "characters")?.id,
+    ...(r.generation_plan
+      ? { compiled: digest(r.generation_plan.segments) }
+      : {}),
     ...(r.model.startsWith("wan")
       ? {
           video_options: r.video_options || {},
@@ -236,15 +244,25 @@ export async function createProject(b: Json) {
     typeof b.title === "string" && b.title.trim() && b.title.length <= 100,
     "请填写项目名称（最多100字）",
   );
-  assert(["16:9", "9:16", "1:1"].includes(b.ratio || "16:9"), "画幅不正确");
+  assert(
+    typeof (b.brief ?? "") === "string" && (b.brief || "").length <= 10000,
+    "项目简介最多10000字",
+  );
+  assert(
+    Object.keys(b).every((key) => ["title", "brief"].includes(key)),
+    "新建项目仅需名称与简介，视频要求请在制作设置中填写",
+  );
   const p: Project = {
     id: uid(),
     title: b.title.trim(),
     brief: String(b.brief || "").slice(0, 10000),
-    style: String(b.style || "电影写实").slice(0, 100),
-    ratio: b.ratio || "16:9",
-    creative_prompt: String(b.creative_prompt || "").slice(0, 12000),
-    creative_spec: validateCreativeSpec(b.creative_spec),
+    production: {
+      style: "电影写实",
+      ratio: "16:9",
+      prompt: "",
+      adaptation: "",
+      revision: 0,
+    },
     assets: [],
     episodes: [],
     created: now(),
@@ -266,44 +284,73 @@ export async function mutate(
       );
       assert(
         typeof b.brief === "string" && b.brief.length <= 10000,
-        "创作方向最多10000字",
-      );
-      assert(
-        typeof b.style === "string" && b.style.trim() && b.style.length <= 100,
-        "请填写风格（最多100字）",
-      );
-      assert(["16:9", "9:16", "1:1"].includes(b.ratio), "画幅不正确");
-      assert(
-        typeof b.creative_prompt === "string" &&
-          b.creative_prompt.length <= 12000,
-        "项目创作规范最多12000字",
+        "项目简介最多10000字",
       );
       assert(
         b.base_updated === p.updated,
-        "项目已在其他页面更新，请重新载入配置后再保存",
+        "项目已在其他页面更新，请重新载入后再保存",
+      );
+      assert(
+        Object.keys(b).every((key) =>
+          ["title", "brief", "base_updated", "episode_id", "run_id"].includes(
+            key,
+          ),
+        ),
+        "项目仅包含名称与简介，请到制作设置修改视频要求",
+      );
+      p.title = b.title.trim();
+      p.brief = b.brief;
+      return { ok: true };
+    }
+    if (action === "production-settings") {
+      assert(
+        b.base_revision === p.production.revision,
+        "制作设置已在其他页面更新，请重新打开后再保存",
+      );
+      assert(
+        typeof b.style === "string" && b.style.trim() && b.style.length <= 100,
+        "请填写视觉风格（最多100字）",
+      );
+      assert(["16:9", "9:16", "1:1"].includes(b.ratio), "画幅不正确");
+      assert(
+        typeof b.prompt === "string" && b.prompt.length <= 12000,
+        "美术规范最多12000字",
+      );
+      assert(
+        typeof b.adaptation === "string" && b.adaptation.length <= 12000,
+        "改编要求最多12000字",
+      );
+      assert(
+        Object.keys(b).every((key) =>
+          [
+            "style",
+            "ratio",
+            "prompt",
+            "adaptation",
+            "base_revision",
+            "episode_id",
+            "run_id",
+          ].includes(key),
+        ),
+        "制作设置包含未知字段",
       );
       const next = {
-        title: b.title.trim(),
-        brief: b.brief,
         style: b.style.trim(),
         ratio: b.ratio,
-        creative_prompt: b.creative_prompt,
+        prompt: b.prompt,
+        adaptation: b.adaptation,
       };
-      const changed = ["brief", "style", "ratio", "creative_prompt"].some(
-        (key) =>
-          (key === "creative_prompt"
-            ? projectCreativeText(p)
-            : p[key] || "") !== next[key as keyof typeof next],
-      );
-      if (changed) {
-        p.config_revision = (p.config_revision || 0) + 1;
+      if (
+        Object.entries(next).some(
+          ([key, value]) => p.production[key as keyof typeof next] !== value,
+        )
+      ) {
+        p.production = { ...next, revision: p.production.revision + 1 };
         for (const episode of p.episodes)
-          for (const run of episode.runs) {
+          for (const run of episode.runs)
             if (!episode.locked_at && !run.finished_at)
-              run.project_config_revision = p.config_revision;
-          }
+              run.project_config_revision = p.production.revision;
       }
-      Object.assign(p, next, { creative_spec: {} });
       return { ok: true };
     }
     if (action === "episodes") {
@@ -317,7 +364,7 @@ export async function mutate(
         "预设时长需为大于 0 的整数秒数",
       );
       const r = newRun();
-      r.project_config_revision = p.config_revision || 0;
+      r.project_config_revision = p.production.revision;
       r.model = (await config()).model;
       const e: Episode = {
         id: uid(),
@@ -332,52 +379,44 @@ export async function mutate(
       p.episodes.push(e);
       return { episode_id: e.id, run_id: r.id };
     }
-    if (action === "asset") {
+    if (action === "episode-settings") {
+      const e = p.episodes.find((episode) => episode.id === b.episode_id);
+      assert(e, "分集不存在");
+      assert(!e.locked_at, "本集已永久锁定，只能查看，不能编辑");
       assert(
-        ["character", "scene", "prop", "style", "voice", "video"].includes(
-          b.kind,
-        ) &&
-          typeof b.name === "string" &&
-          b.name.trim(),
-        "请填写资源名称和类型",
+        typeof b.title === "string" && b.title.trim() && b.title.length <= 100,
+        "请填写集名（最多100字）",
       );
       assert(
-        !b.url || (typeof b.url === "string" && b.url.startsWith("https://")),
-        "参考地址需为HTTPS",
+        typeof b.brief === "string" && b.brief.length <= 10000,
+        "本集剧情最多10000字",
       );
-      let a = p.assets.find((a) => a.id === b.asset_id);
-      if (!a) {
-        a = {
-          id: uid(),
-          name: b.name,
-          kind: b.kind,
-          versions: [],
-          selected: null,
-        };
-        p.assets.push(a);
-      }
-      a.name = b.name.trim().slice(0, 100);
-      a.kind = b.kind;
-      const base =
-        a.versions.find((v) => v.id === b.base_version) ||
-        a.versions.find((v) => v.id === a!.selected);
-      const v = {
-        ...stateFields(base || {}),
-        reference_images: copy(
-          base?.images?.length
-            ? base.images
-            : base?.reference_images || (base?.url ? [{ url: base.url }] : []),
-        ),
-        id: uid(),
-        number: a.versions.length + 1,
-        description: String(b.description || "").slice(0, 15000),
-        url: b.url || "",
-        created: now(),
-      };
-      a.versions.push(v);
-      a.selected = v.id;
-      return { asset_id: a.id };
+      assert(
+        Number.isSafeInteger(b.target_duration) && b.target_duration > 0,
+        "预设时长需为大于 0 的整数秒数",
+      );
+      assert(
+        b.base_episode &&
+          digest(b.base_episode) ===
+            digest({
+              title: e.title,
+              brief: e.brief,
+              target_duration: e.target_duration ?? DEFAULT_EPISODE_DURATION,
+            }),
+        "本集信息已在其他页面更新，请重新打开编辑后再保存",
+      );
+      Object.assign(e, {
+        title: b.title.trim(),
+        brief: b.brief,
+        target_duration: b.target_duration,
+      });
+      return { episode_id: e.id };
     }
+    if (action === "asset") return saveAssetDefinition(p, b);
+    if (
+      ["asset-state", "asset-adopt", "asset-update-references"].includes(action)
+    )
+      return mutateAssetLibrary(p, action, b, db);
     if (action === "asset-image") {
       const a = p.assets.find((a) => a.id === b.asset_id);
       assert(
@@ -393,6 +432,10 @@ export async function mutate(
       assert(!active.rowCount, "本项资源正在出图，请等待完成");
       const cfg = await config();
       const connection = imageRequest(cfg, cfg.image_model, "");
+      assert(
+        !b.note || (typeof b.note === "string" && b.note.length <= 2000),
+        "调整要求最多2000字",
+      );
       const job: Job = {
         id: uid(),
         project_id: p.id,
@@ -407,16 +450,23 @@ export async function mutate(
         snapshot: {
           entry: {
             ...copy(v),
+            reference_images: copy(
+              v.images?.length
+                ? v.images
+                : adoptedAssetVersion(a, stateId(v))?.images ||
+                    v.reference_images ||
+                    [],
+            ),
             asset_id: a.id,
             version: v.id,
             name: a.name,
             kind: a.kind,
           },
           world: {},
-          style: p.style,
-          project_brief: p.brief,
+          style: p.production.style,
           project_prompt: projectPrompt(p),
           direction: "",
+          generation_note: b.note || "",
         },
         image_model: cfg.image_model,
         key_fingerprint: digest(connection.key),
@@ -485,9 +535,106 @@ export async function mutate(
       return { e, r };
     }
     assert(!e.locked_at, "本集已永久锁定，只能查看，不能编辑或新建版本");
+    if (action === "save-storyboard") {
+      assert(!r.finished_at, "此方案已结束，请新建方案后编辑");
+      requireStep(p, r, "story");
+      assert(
+        !(await busy(
+          r.id,
+          ["character-image", "characters", "video", "video-batch"],
+          db,
+        )),
+        "当前方案还有生成任务，请等待结束后保存分镜",
+      );
+      assert(
+        b.base_director === r.steps.director.selected &&
+          b.base_resources === r.steps.characters.selected,
+        "分镜或资源已更新，请重新载入后再保存",
+      );
+      const content = validate(r, "director", {
+        ...copy(b.content),
+        planning_mode: "storyboard",
+        segments: [],
+      });
+      r.storyboard_mode = true;
+      const dv = addVersion(
+        r,
+        "director",
+        content,
+        p,
+        "storyboard",
+        true,
+        true,
+      );
+      const resources = validate(
+        r,
+        "characters",
+        copy(b.resources || { world: {}, characters: [] }),
+      );
+      for (const beat of content.beats) {
+        for (const match of String(beat.description).matchAll(
+          /@resource:([\w-]+)/g,
+        ))
+          assert(
+            resources.characters.some(
+              (entry: Json) =>
+                resourceKey(entry) === match[1] &&
+                entry.segment_ids.includes(beat.id),
+            ),
+            "分镜标签未绑定到本镜资源，请检查引用",
+          );
+      }
+      if (b.confirm) {
+        assert(
+          resources.characters.every(
+            (entry: Json) => entry.images?.length || entry.url,
+          ),
+          "请先完成资源参考图，再确认分镜与资源",
+        );
+      }
+      registerSettings(p, e.id, resources);
+      const rv = addVersion(
+        r,
+        "characters",
+        resources,
+        p,
+        "storyboard",
+        true,
+        b.confirm === true,
+      );
+      return { director_version: dv.id, resource_version: rv.id };
+    }
+    if (action === "compile-video-plan") {
+      assert(!r.finished_at, "此方案已结束，请新建方案后编辑");
+      requireStep(p, r, "director");
+      requireStep(p, r, "characters");
+      assert(
+        !(await busy(r.id, ["video", "video-batch"], db)),
+        "视频任务进行中，不能重新组合片段",
+      );
+      const direction = selected(r, "director")!;
+      assert(
+        direction.content.planning_mode === "storyboard",
+        "此方案使用历史片段，请先在分镜与资源中保存新版本",
+      );
+      const resources = selected(r, "characters")!;
+      const grouped = compileStoryboard(
+        direction.content,
+        resources.content.characters,
+        r.model,
+      );
+      r.generation_plan = {
+        segments: grouped,
+        model: r.model,
+        director_version: direction.id,
+        resource_version: resources.id,
+        created: now(),
+      };
+      return copy(r.generation_plan);
+    }
     if (action === "runs") {
       const n = newRun(String(b.name || "新制作方案").slice(0, 100));
-      n.project_config_revision = p.config_revision || 0;
+      n.project_config_revision = p.production.revision;
       n.model = (await config()).model;
       if (b.inherit === "all") {
         for (const k of [
@@ -498,8 +645,10 @@ export async function mutate(
           "exports",
           "conversations",
           "video_options",
+          "storyboard_mode",
+          "generation_plan",
         ])
-          n[k] = copy(r[k] ?? {});
+          if (r[k] !== undefined) n[k] = copy(r[k]);
       } else if (b.inherit === "story" && selected(r, "story")) {
         const v = selected(r, "story")!;
         addVersion(n, "story", v.content, p, "fork", true, !!v.approved);
@@ -531,8 +680,15 @@ export async function mutate(
       );
       // The project lock held by editProject makes replacing the finished
       // scheme atomic, including concurrent completion requests.
-      for (const previous of e.runs) delete previous.finished_at;
+      for (const previous of e.runs) {
+        if (previous.finished_at) {
+          delete previous.finished_at;
+          delete previous.production_snapshot;
+          previous.project_config_revision = p.production.revision;
+        }
+      }
       r.finished_at = now();
+      r.production_snapshot = copy(p.production);
       return { ok: true };
     }
     if (action === "model") {
@@ -544,35 +700,40 @@ export async function mutate(
       r.model = b.model;
       return { ok: true };
     }
-    if (action === "confirm-story") {
-      const stage = r.steps.story;
+    if (action === "select-story") {
       assert(
-        b.expected_selected === stage.selected,
-        "当前确认版本已变更，请重新检查后确认",
+        b.expected_selected === r.steps.story.selected,
+        "选章来源已在其他页面变更，请刷新后重试",
       );
-      assert(
-        b.basis_revision === (r.project_config_revision || 0),
-        "项目创作约定已变更，请重新检查后确认",
-      );
-      const content = validate(r, "story", copy(b.content));
-      const existing = b.version_id
-        ? stage.versions.find((version) => version.id === b.version_id)
-        : undefined;
-      assert(!b.version_id || existing, "版本不存在");
-      let version = existing;
+      const content = await storySource(p.id, b, db);
+      const current = selected(r, "story");
       if (
-        !version ||
-        digest(version.content) !== digest(content) ||
-        digest(version.inputs) !== digest(inputs(p, r, "story"))
-      ) {
-        version = addVersion(r, "story", content, p, "manual", true, true);
-      } else {
-        stage.selected = version.id;
-        version.approved = true;
-      }
+        current?.approved &&
+        digest(current.content) === digest(content) &&
+        digest(current.inputs) === digest(inputs(p, r, "story"))
+      )
+        return { version_id: current.id };
+      const version = addVersion(
+        r,
+        "story",
+        content,
+        p,
+        "story-selection",
+        true,
+        true,
+      );
       return { version_id: version.id };
     }
+    assert(
+      action !== "confirm-story",
+      "请从本项目的故事中选择已定稿章节，视频内不再编写故事",
+    );
     let step = b.step === "segments" ? "director" : b.step;
+    if (["save-step", "adopt-step", "approve-step"].includes(action))
+      assert(
+        step !== "story",
+        "请从本项目的故事中选择已定稿章节，视频内不再编写故事",
+      );
     if (action === "save-step") {
       if (b.step === "segments")
         b.content = { ...selected(r, "director")?.content, ...b.content };
@@ -622,7 +783,7 @@ export async function mutate(
       if (action === "plan") step = "director";
       const unified = action === "chat" && step === "assistant";
       assert(
-        unified || ["story", "director", "characters"].includes(step),
+        unified || ["director", "characters"].includes(step),
         "不支持此创作阶段",
       );
       if (step === "director") requireStep(p, r, "story");
@@ -632,8 +793,8 @@ export async function mutate(
           action === "chat" ? "agent_configured" : "text_configured"
         ],
         action === "chat"
-          ? "请先配置整体助手的模型与服务连接"
-          : "请先配置文案模型与服务连接",
+          ? "请先配置功能（流程）的模型与服务连接"
+          : "请先配置文字模型与服务连接",
       );
       if (action === "chat") {
         assert(
@@ -896,10 +1057,6 @@ export async function mutate(
         v && digest(v.inputs) === digest(inputs(p, r, "characters")),
         "请先准备当前方案的设定集",
       );
-      if (v.id !== r.steps.characters.selected)
-        r.steps.characters.selected = v.id;
-      if (v.approved)
-        v = addVersion(r, "characters", v.content, p, "manual", true);
       registerSettings(p, e.id, v.content);
       await saveProject(p, db);
       const list =
@@ -1120,7 +1277,7 @@ export async function mutate(
       if (mode === "align")
         assert(
           selected(r, "director")!.content.beats.some((b: Json) =>
-            b.dialogue?.trim(),
+            dialogueText(b),
           ),
           "方案没有台词，请使用语音识别",
         );
@@ -1133,7 +1290,7 @@ export async function mutate(
           inputs: inputs(p, r, "finish"),
           snapshot: {
             items,
-            ratio: p.ratio,
+            ratio: p.production.ratio,
             resolution,
             caption_mode: mode,
             audio_model:

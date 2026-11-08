@@ -41,7 +41,7 @@ test("new runs show one actionable starting stage and five stages awaiting prere
     stages.map((stage) => stage.state),
     ["empty", "blocked", "blocked", "blocked", "blocked", "blocked"],
   );
-  assert.equal(stages[0].action, "开始故事");
+  assert.equal(stages[0].action, "选择故事章节");
 });
 
 test("unadopted drafts are exposed without counting them as completed stages", () => {
@@ -49,14 +49,14 @@ test("unadopted drafts are exposed without counting them as completed stages", (
   run.steps.story.versions.push(version("draft", 1, { text: "新稿" }));
   let story = workflowStages(run, [])[0];
   assert.equal(story.newDraft, true);
-  assert.equal(story.action, "审阅故事草稿");
+  assert.equal(story.action, "选择故事章节");
   assert.match(story.detail, /待审阅采用/);
   assert.equal(story.status, "empty");
   run.steps.story.selected = "draft";
   run.statuses = { story: "draft" };
   story = workflowStages(run, [])[0];
   assert.equal(story.newDraft, false);
-  assert.equal(story.action, "确认故事");
+  assert.equal(story.action, "选择故事章节");
 });
 
 test("active jobs map to their production stage and remain visible alongside existing approved results", () => {
@@ -124,5 +124,5 @@ test("video counts include only adopted fresh final clips and stale stages expla
   const stages = workflowStages(run, []);
   assert.match(stages[3].detail, /1 \/ 4 段/);
   assert.equal(stages[1].state, "stale");
-  assert.equal(stages[1].action, "更新视频方案");
+  assert.equal(stages[1].action, "更新分镜与资源");
 });

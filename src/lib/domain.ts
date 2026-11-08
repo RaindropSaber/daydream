@@ -49,17 +49,30 @@ export function selected(r: Run, s: string): Version | undefined {
   return g?.versions.find((v) => v.id === g.selected);
 }
 export const segments = (r: Run): Json[] =>
-  selected(r, "segments")?.content.segments || [];
+  selected(r, "director")?.content.planning_mode === "storyboard"
+    ? r.generation_plan?.segments || []
+    : selected(r, "segments")?.content.segments || [];
+export const generationPlanFresh = (r: Run) =>
+  selected(r, "director")?.content.planning_mode !== "storyboard" ||
+  (r.generation_plan?.director_version === selected(r, "director")?.id &&
+    r.generation_plan?.resource_version === selected(r, "characters")?.id &&
+    r.generation_plan?.model === r.model);
 export const chosen = (r: Run, sid: string) =>
   r.media[sid]?.find((v) => v.id === r.media_selection[sid]);
 export const entries = (r: Run, sid?: string): Json[] =>
   (selected(r, "characters")?.content.characters || []).filter(
-    (c: Json) => !sid || c.segment_ids?.includes(sid),
+    (c: Json) =>
+      !sid ||
+      c.segment_ids?.includes(sid) ||
+      (selected(r, "director")?.content.planning_mode === "storyboard" &&
+        segments(r)
+          .find((s) => s.id === sid)
+          ?.beat_ids.some((id: string) => c.segment_ids?.includes(id))),
   );
 export function inputs(p: Project, r: Run, s: string): Json {
   if (
     r.project_config_revision &&
-    ["story", "director", "segments", "characters"].includes(s)
+    ["director", "segments", "characters"].includes(s)
   ) {
     const base = inputs(p, { ...r, project_config_revision: 0 }, s);
     return { ...base, project_config: r.project_config_revision };
@@ -70,7 +83,10 @@ export function inputs(p: Project, r: Run, s: string): Json {
       director: selected(r, "director")?.id ?? null,
     };
   if (s === "director" || s === "segments")
-    return { story: selected(r, "story")?.id ?? null, model: r.model };
+    return r.storyboard_mode === true ||
+      selected(r, "director")?.content.planning_mode === "storyboard"
+      ? { story: selected(r, "story")?.id ?? null }
+      : { story: selected(r, "story")?.id ?? null, model: r.model };
   if (s === "assembly")
     return {
       media: Object.fromEntries(
@@ -82,9 +98,14 @@ export function inputs(p: Project, r: Run, s: string): Json {
   if (s === "finish")
     return {
       ...inputs(p, r, "assembly"),
-      ratio: p.ratio,
+      ratio: r.production_snapshot?.ratio ?? p.production.ratio,
       plan: selected(r, "director")
-        ? digest(selected(r, "director")!.content)
+        ? digest({
+            ...selected(r, "director")!.content,
+            ...(selected(r, "director")!.content.planning_mode === "storyboard"
+              ? { compiled: segments(r) }
+              : {}),
+          })
         : null,
     };
   return {};
@@ -155,6 +176,7 @@ export function status(p: Project, r: Run, s: string): Status {
     const list = segments(r);
     if (!list.length) return "empty";
     if (
+      !generationPlanFresh(r) ||
       status(p, r, "director") !== "approved" ||
       status(p, r, "characters") !== "approved"
     )

@@ -71,7 +71,7 @@ export function WorkflowPipeline({
   current: string;
   onSelect: (step: string) => void;
 }) {
-  const stages = workflowStages(run, jobs);
+  const stages = workflowStages(run, jobs, true);
   const complete = stages.filter((stage) => stage.status === "approved").length;
   return (
     <section
@@ -80,11 +80,7 @@ export function WorkflowPipeline({
     >
       <div className="shrink-0 border-b p-3">
         {controls && <div className="mb-3">{controls}</div>}
-        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-          <Clapperboard className="size-3.5 shrink-0 text-primary" />
-          <span className="hidden md:inline">制作流水线</span>
-        </div>
-        <p className="mt-2 text-center text-[11px] text-muted-foreground md:text-left">
+        <p className="text-center text-[11px] text-muted-foreground md:text-left">
           {complete} / {stages.length}
           <span className="hidden md:inline"> 步已完成</span>
         </p>

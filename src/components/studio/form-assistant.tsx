@@ -21,13 +21,18 @@ import type { Json } from "@/lib/types";
 
 import { type FormSnapshot } from "@/lib/assistant-draft";
 import type { ReferenceScope } from "@/lib/assistant-request";
-type Target = {
+export type Target = {
   id: string;
   title: string;
-  skill: CreationSkill;
+  skill: CreationSkill | "story" | "operation";
+  prompt?: string;
+  request?: (snapshot: FormSnapshot, messages: DraftMessage[]) => Promise<Json>;
   scope: ReferenceScope;
   snapshot: () => FormSnapshot;
-  apply: (patch: Json) => void;
+  apply: (patch: Json) => void | Promise<void>;
+  appliedMessage?: string;
+  applyLabel?: string;
+  activity?: ReactNode;
 };
 export type DraftMessage = {
   id: string;
@@ -37,7 +42,7 @@ export type DraftMessage = {
   before?: FormSnapshot;
   applied?: boolean;
   promptTrace?: Json;
-  skill?: CreationSkill;
+  skill?: CreationSkill | "story" | "operation";
 };
 export type FormConversation = {
   id: string;
@@ -57,7 +62,11 @@ const FormAssistantContext = createContext<{
   conversations: FormConversation[];
   activeId: string | null;
   select: (id: string | null) => void;
-  launch: (target: Target, discuss?: boolean) => void;
+  launch: (
+    target: Target,
+    discuss?: boolean,
+    proposal?: { text: string; patch: Json },
+  ) => void;
   newSession: () => void;
   update: (
     id: string,
@@ -84,7 +93,11 @@ export function FormAssistantProvider({ children }: { children: ReactNode }) {
     setTargets((old) => [...old.filter((t) => t.id !== target.id), target]);
     return () => setTargets((old) => old.filter((t) => t.id !== target.id));
   }).current;
-  const launch = (target: Target, discuss = false) => {
+  const launch = (
+    target: Target,
+    discuss = false,
+    proposal?: { text: string; patch: Json },
+  ) => {
     if (target.snapshot().disabled) return;
     const id = crypto.randomUUID();
     setConversations((old) => [
@@ -92,13 +105,29 @@ export function FormAssistantProvider({ children }: { children: ReactNode }) {
       {
         id,
         target,
-        title: "新对话",
-        messages: [],
+        title: proposal ? target.title : "新对话",
+        messages: proposal
+          ? [
+              {
+                id: crypto.randomUUID(),
+                role: "assistant",
+                text: proposal.text,
+                patch: proposal.patch,
+                skill: target.skill,
+                before: target.snapshot(),
+              },
+            ]
+          : [],
         busy: false,
         error: "",
-        value: discuss
-          ? `使用 @skill:${target.skill}，和我讨论${CREATION_SKILLS[target.skill].module}，先给建议。`
-          : skillPrompt(target.skill),
+        value: proposal
+          ? ""
+          : (target.prompt ??
+            (target.skill === "story" || target.skill === "operation"
+              ? "帮我完善当前故事，生成可供预览和应用的候选稿。"
+              : discuss
+                ? `使用 @skill:${target.skill}，和我讨论${CREATION_SKILLS[target.skill].module}，先给建议。`
+                : skillPrompt(target.skill))),
       },
     ]);
     select(id);
@@ -147,6 +176,38 @@ export function FormAssistantProvider({ children }: { children: ReactNode }) {
   );
 }
 export const useFormAssistant = () => useContext(FormAssistantContext);
+// Specialized creative tools share the global conversation and result-card UI.
+export function useAssistantTarget(key: string, config: Omit<Target, "id">) {
+  const { register, launch } = useFormAssistant();
+  const live = useRef(config);
+  live.current = config;
+  const target = useRef<Target | null>(null);
+  useEffect(() => {
+    let mounted = true;
+    const next: Target = {
+      ...live.current,
+      id: crypto.randomUUID(),
+      snapshot: () => {
+        const snapshot = live.current.snapshot();
+        return { ...snapshot, disabled: !mounted || snapshot.disabled };
+      },
+      request: (snapshot, messages) =>
+        live.current.request!(snapshot, messages),
+      apply: (patch) => live.current.apply(patch),
+    };
+    target.current = next;
+    const unregister = register(next);
+    return () => {
+      mounted = false;
+      unregister();
+    };
+  }, [key, register]);
+  return (prompt?: string, proposal?: { text: string; patch: Json }) => {
+    if (!target.current) return;
+    target.current.prompt = prompt ?? live.current.prompt;
+    launch(target.current, false, proposal);
+  };
+}
 export function FormAssistant({
   skill,
   projectId,

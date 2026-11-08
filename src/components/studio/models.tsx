@@ -38,7 +38,8 @@ const SERVICES = [
   {
     id: "ark" as const,
     title: "火山方舟",
-    description: "连接 Seedream、Seedance，以及方舟上的文案和助手模型。",
+    description:
+      "连接 Seedream、Seedance，以及方舟上的文字和功能（流程）模型。",
     console: "https://ark.volcengine.com/region:cn-beijing/apikey",
   },
   {
@@ -51,7 +52,7 @@ const SERVICES = [
   {
     id: "compatible" as const,
     title: "自定义兼容服务",
-    description: "支持 Chat Completions 的服务，可供文案和整体助手使用。",
+    description: "支持 Chat Completions 的服务，可供文字和功能（流程）使用。",
     console: null,
   },
 ];
@@ -191,7 +192,7 @@ export function Models() {
   );
 
   return (
-    <>
+    <div className="mx-auto w-full max-w-5xl">
       <Heading title="模型管理" />
       <div
         role="tablist"
@@ -243,7 +244,7 @@ export function Models() {
               toast.success("模型选择已保存");
             });
           }}
-          className="max-w-5xl space-y-5"
+          className="space-y-5"
         >
           <div className="space-y-3 rounded-xl border bg-card p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -343,14 +344,15 @@ export function Models() {
             {[
               {
                 role: "text",
-                title: "文案创作",
-                description: "用于整理故事、视频方案和设定集等内容草稿。",
+                title: "文字",
+                description:
+                  "用于故事、分镜、文案和设定等文字内容的创作与修改。",
                 Icon: FileText,
               },
               {
                 role: "agent",
-                title: "创作助手",
-                description: "用于创作助手对话。",
+                title: "功能（流程）",
+                description: "用于助手调度、工具调用、素材分析与匹配等流程。",
                 Icon: Bot,
               },
             ].map(({ role, title, description, Icon }) => (
@@ -430,7 +432,7 @@ export function Models() {
         id="panel-connections"
         aria-labelledby="tab-connections"
         hidden={module !== "connections"}
-        className="max-w-5xl space-y-5"
+        className="space-y-5"
       >
         <p className="text-sm leading-7 text-muted-foreground">
           测试连接后，需点击「保存连接」才会保存修改。
@@ -597,6 +599,6 @@ export function Models() {
           连接测试通过后，部分模型仍可能需要单独开通权限。
         </p>
       </section>
-    </>
+    </div>
   );
 }

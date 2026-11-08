@@ -1,3 +1,4 @@
+import { dialogueText } from "../storyboard";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -254,11 +255,11 @@ export async function renderFinish(
     const transcript = snap.director.beats
       .filter(
         (b: Json) =>
-          b.dialogue?.trim() &&
+          dialogueText(b) &&
           b.start < s.start + item.end &&
           b.end > s.start + item.start,
       )
-      .map((b: Json) => b.dialogue.trim())
+      .map((b: Json) => dialogueText(b))
       .join("\n");
     if (snap.caption_mode === "align" && !transcript) {
       offset += duration;
@@ -302,7 +303,7 @@ export async function renderFinish(
     }
     offset += duration;
   }
-  const srt = path.join(folder, "captions.srt");
+  const srt = await mediaPath(base + "/captions.srt", false);
   await fs.writeFile(
     srt,
     cues
@@ -323,7 +324,7 @@ export async function renderFinish(
         )
         .join("\n"),
   );
-  const final = path.join(folder, "final.mp4");
+  const final = await mediaPath(base + "/final.mp4", false);
   await ff(
     [
       "-y",

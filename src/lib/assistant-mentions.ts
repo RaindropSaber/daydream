@@ -1,6 +1,7 @@
 import { CREATION_SKILLS, type CreationSkill } from "./creation-flow";
 
-export const MENTION_PATTERN = /@(skill|stage|asset):([a-zA-Z0-9_-]+)/g;
+export const MENTION_PATTERN =
+  /@(skill|stage|asset|resource):([a-zA-Z0-9_-]+)/g;
 export function mentionedSkills(text: string): CreationSkill[] {
   return [
     ...new Set(
@@ -15,8 +16,14 @@ export function mentionedSkills(text: string): CreationSkill[] {
 export type MentionOption = {
   token: string;
   label: string;
-  kind: "skill" | "stage" | "asset";
+  kind: "skill" | "stage" | "asset" | "resource";
   description: string;
+  preview?: {
+    images?: { url: string }[];
+    description?: string;
+    version?: string;
+    status?: string;
+  };
 };
 export function mentionQuery(value: string, caret: number) {
   const match = value

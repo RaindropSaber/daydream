@@ -97,6 +97,9 @@ export function AssistantComposer({
   waiting,
   options,
   focusKey,
+  documentMode = false,
+  label = "创作消息",
+  onMentionClick,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -105,13 +108,25 @@ export function AssistantComposer({
   waiting: boolean;
   options: MentionOption[];
   focusKey: string;
+  documentMode?: boolean;
+  label?: string;
+  onMentionClick?: (option: MentionOption) => void;
 }) {
   const editor = useRef<HTMLDivElement>(null);
+  const mentionClick = useRef(onMentionClick);
+  mentionClick.current = onMentionClick;
   const lastValue = useRef("");
   const composing = useRef(false);
   const savedCaret = useRef(value.length);
   const [query, setQuery] = useState<ReturnType<typeof mentionQuery>>(null);
   const [active, setActive] = useState(0);
+  const [hovered, setHovered] = useState<{
+    option: MentionOption;
+    left: number;
+    top: number;
+  } | null>(null);
+  const optionsSignature = JSON.stringify(options);
+  const renderedOptions = useRef("");
   const listId = useId();
   const matches = query
     ? options.filter((o) =>
@@ -143,6 +158,38 @@ export function AssistantComposer({
       const name = document.createElement("span");
       name.textContent = `${match[1] === "skill" ? "✦ " : "@"}${label}`;
       chip.title = `${match[1] === "skill" ? "Skill" : "引用"} · ${match[2]}`;
+      if (documentMode && option) {
+        chip.title = "";
+        chip.setAttribute("role", "button");
+        chip.setAttribute("aria-label", `资源：${label}`);
+        chip.tabIndex = 0;
+        chip.classList.add("cursor-pointer");
+        if (option.preview?.status && option.preview.status !== "已绑定")
+          chip.classList.add("border-amber-300", "text-amber-700");
+        chip.onmouseenter = () => {
+          const rect = chip.getBoundingClientRect();
+          setHovered({
+            option,
+            left: Math.min(rect.left, window.innerWidth - 300),
+            top: Math.min(rect.bottom + 6, window.innerHeight - 280),
+          });
+        };
+        chip.onmouseleave = () => setHovered(null);
+        chip.onclick = (e) => {
+          e.stopPropagation();
+          setHovered(null);
+          if (root.getAttribute("contenteditable") === "true")
+            mentionClick.current?.(option);
+        };
+        chip.onkeydown = (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            e.stopPropagation();
+            if (root.getAttribute("contenteditable") === "true")
+              mentionClick.current?.(option);
+          }
+        };
+      }
       const remove = document.createElement("button");
       remove.type = "button";
       remove.tabIndex = -1;
@@ -151,7 +198,8 @@ export function AssistantComposer({
       remove.setAttribute("aria-label", `移除${label}`);
       remove.textContent = "×";
       remove.onmousedown = (e) => e.preventDefault();
-      remove.onclick = () => {
+      remove.onclick = (e) => {
+        e.stopPropagation();
         if (root.getAttribute("contenteditable") !== "true") return;
         chip.remove();
         const next = editorText(root);
@@ -172,14 +220,22 @@ export function AssistantComposer({
     }
   };
   useEffect(() => {
-    if (lastValue.current !== value || !editor.current?.childNodes.length) {
+    if (
+      lastValue.current !== value ||
+      !editor.current?.childNodes.length ||
+      renderedOptions.current !== optionsSignature
+    ) {
+      const focused = document.activeElement === editor.current;
+      const caret = focused && editor.current ? caretOffset(editor.current) : 0;
       render(value);
       lastValue.current = value;
+      renderedOptions.current = optionsSignature;
+      if (focused && editor.current) moveCaret(editor.current, caret);
     }
   }, [value, options]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     setQuery(null);
-    if (!disabled) {
+    if (!disabled && !documentMode) {
       editor.current?.focus();
       if (editor.current) moveCaret(editor.current, value.length);
     }
@@ -196,8 +252,10 @@ export function AssistantComposer({
     const text = editorText(editor.current);
     const caret = caretOffset(editor.current);
     savedCaret.current = caret;
-    lastValue.current = text;
-    onChange(text);
+    if (lastValue.current !== text) {
+      lastValue.current = text;
+      onChange(text);
+    }
     const next = mentionQuery(text, caret);
     setQuery(next);
     setActive(0);
@@ -230,11 +288,13 @@ export function AssistantComposer({
     setActive(0);
   };
   return (
-    <div className="relative rounded-xl border bg-background p-2 focus-within:border-primary/40 focus-within:ring-2 focus-within:ring-primary/10">
+    <div
+      className={`relative rounded-xl border bg-background p-2 focus-within:border-primary/40 focus-within:ring-2 focus-within:ring-primary/10 ${documentMode ? "flex min-h-0 flex-1 flex-col" : ""}`}
+    >
       {query && !disabled && (
         <div className="absolute inset-x-0 bottom-full z-10 mb-2 overflow-hidden rounded-xl border bg-popover shadow-xl">
           <div className="border-b px-3 py-2 text-xs text-muted-foreground">
-            引用 skill 或项目内容
+            {documentMode ? "选择分镜资源" : "引用 skill 或项目内容"}
           </div>
           <div
             id={listId}
@@ -284,7 +344,9 @@ export function AssistantComposer({
               })
             ) : (
               <p className="p-3 text-sm text-muted-foreground">
-                没有匹配项，试试“故事”或“story”
+                {documentMode
+                  ? "没有匹配的资源，可以先新增资源。"
+                  : "没有匹配项，试试“故事”或“story”"}
               </p>
             )}
           </div>
@@ -296,7 +358,7 @@ export function AssistantComposer({
       <div
         ref={editor}
         role="textbox"
-        aria-label="创作消息"
+        aria-label={label}
         aria-multiline="true"
         aria-autocomplete="list"
         aria-expanded={!!query && !disabled}
@@ -308,9 +370,13 @@ export function AssistantComposer({
         contentEditable={!disabled}
         suppressContentEditableWarning
         data-placeholder={
-          disabled ? "暂时无法输入" : "输入消息，@ 引用 skill 或内容…"
+          disabled
+            ? "暂时无法输入"
+            : documentMode
+              ? "描述这一镜的画面、镜头、台词和声音，输入 @ 引用资源…"
+              : "输入消息，@ 引用 skill 或内容…"
         }
-        className="max-h-44 min-h-16 overflow-y-auto whitespace-pre-wrap break-words px-1 py-1.5 text-sm leading-7 outline-none empty:before:pointer-events-none empty:before:text-muted-foreground empty:before:content-[attr(data-placeholder)]"
+        className={`${documentMode ? "min-h-0 flex-1" : "max-h-44 min-h-16"} overflow-y-auto whitespace-pre-wrap break-words px-1 py-1.5 text-sm leading-7 outline-none empty:before:pointer-events-none empty:before:text-muted-foreground empty:before:content-[attr(data-placeholder)]`}
         onInput={read}
         onClick={read}
         onCompositionStart={() => {
@@ -380,7 +446,7 @@ export function AssistantComposer({
           }
           if (e.key === "Enter") {
             e.preventDefault();
-            if (e.shiftKey && editor.current) {
+            if ((e.shiftKey || documentMode) && editor.current) {
               const caret = caretOffset(editor.current);
               insert("\n", caret, caret);
             } else onSend();
@@ -396,41 +462,69 @@ export function AssistantComposer({
             e.preventDefault();
         }}
       />
-      <div className="flex items-center justify-between pt-1">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-7 gap-1 px-1.5 text-xs text-muted-foreground"
-          aria-label="添加引用"
-          disabled={disabled}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={openMentions}
-        >
-          <AtSign className="size-3.5" />
-          引用
-        </Button>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] text-muted-foreground">
-            Shift + Enter 换行
-          </span>
+      {!documentMode && (
+        <div className="flex items-center justify-between pt-1">
           <Button
             type="button"
-            size="icon"
-            className="size-8 rounded-lg"
-            aria-label="发送"
-            title="发送（Enter）"
-            disabled={disabled || !value.trim()}
-            onClick={onSend}
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1 px-1.5 text-xs text-muted-foreground"
+            aria-label={documentMode ? "添加资源引用" : "添加引用"}
+            disabled={disabled}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={openMentions}
           >
-            {waiting ? (
-              <LoaderCircle className="size-4 animate-spin" />
-            ) : (
-              <Send className="size-4" />
-            )}
+            <AtSign className="size-3.5" />
+            {documentMode ? "资源" : "引用"}
           </Button>
+          {!documentMode && (
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-muted-foreground">
+                Shift + Enter 换行
+              </span>
+              <Button
+                type="button"
+                size="icon"
+                className="size-8 rounded-lg"
+                aria-label="发送"
+                title="发送（Enter）"
+                disabled={disabled || !value.trim()}
+                onClick={onSend}
+              >
+                {waiting ? (
+                  <LoaderCircle className="size-4 animate-spin" />
+                ) : (
+                  <Send className="size-4" />
+                )}
+              </Button>
+            </div>
+          )}
         </div>
-      </div>
+      )}
+      {hovered && (
+        <div
+          className="pointer-events-none fixed z-[80] w-72 space-y-2 rounded-xl border bg-popover p-3 shadow-xl"
+          style={{ left: hovered.left, top: hovered.top }}
+        >
+          <p className="text-sm font-medium">{hovered.option.label}</p>
+          {hovered.option.preview?.images?.[0] && (
+            <img
+              src={hovered.option.preview.images[0].url}
+              alt={hovered.option.label}
+              className="h-32 w-full rounded-md object-contain bg-muted"
+            />
+          )}
+          <p className="text-xs text-muted-foreground">
+            {hovered.option.preview?.status} · {hovered.option.preview?.version}
+          </p>
+          <p className="line-clamp-3 text-xs leading-5">
+            {hovered.option.preview?.description || hovered.option.description}
+          </p>
+          <p className="text-[10px] text-muted-foreground">
+            点击选择版本、参考视图或编辑设定
+          </p>
+        </div>
+      )}
     </div>
   );
 }
