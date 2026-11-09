@@ -90,6 +90,8 @@ npm start
 
 ## Docker 运行
 
+VPS 与反向代理的部署方式见 [VPS 镜像部署](docs/deployment.md)，生产配置为 [compose.production.yaml](compose.production.yaml)。
+
 镜像仓库：[raindropsaber/daydream](https://hub.docker.com/r/raindropsaber/daydream)，提供 `latest` 和 `0.2.0` 标签，当前平台为 `linux/amd64`。私有仓库需先登录有访问权限的 Docker Hub 账号，再拉取并启动：
 
 ```sh

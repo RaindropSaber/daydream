@@ -1,0 +1,27 @@
+name: daydream
+
+services:
+  daydream:
+    image: ${DAYDREAM_IMAGE:-raindropsaber/daydream:0.2.0}
+    pull_policy: never
+    container_name: daydream
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${DAYDREAM_BIND_ADDRESS:-172.17.0.1}:${DAYDREAM_PORT:-8988}:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATA_DIR: /data
+      TRUSTED_HOSTS: localhost,127.0.0.1,[::1],${DAYDREAM_PUBLIC_HOST:-daydream.raindrop.cyou}
+    volumes:
+      - daydream-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  daydream-data:
+    name: daydream-data
