@@ -88,6 +88,61 @@ npm start
 
 网页、API、媒体读取和后台任务由同一个 Node 应用提供。无需另外启动 worker。开发模式和生产模式应轮流运行，避免争用同一个端口和工作区。
 
+## Docker 运行
+
+镜像仓库：[raindropsaber/daydream](https://hub.docker.com/r/raindropsaber/daydream)，提供 `latest` 和 `0.2.0` 标签，当前平台为 `linux/amd64`。私有仓库需先登录有访问权限的 Docker Hub 账号，再拉取并启动：
+
+```sh
+docker login
+docker pull raindropsaber/daydream:0.2.0
+docker run -d --name daydream --init --restart unless-stopped \
+  -p 127.0.0.1:3000:3000 \
+  -v daydream-data:/data \
+  raindropsaber/daydream:0.2.0
+docker logs -f daydream
+```
+
+### 从源码构建
+
+安装 Docker Engine / Docker Desktop（含 Compose）后，在项目根目录执行：
+
+```sh
+docker compose up -d --build
+docker compose logs -f daydream
+```
+
+打开 [http://127.0.0.1:3000](http://127.0.0.1:3000)。首次启动从日志取得管理员初始化链接，将链接中的 `0.0.0.0:3000` 替换为浏览器实际访问的 `127.0.0.1:3000`，保留完整路径和 token。模型连接可在登录后通过界面配置。容器内同时运行网页、后台任务和 SQLite，无需额外数据库或 worker。
+
+镜像名为 `daydream:local`，使用非 root 用户运行，包含 FFmpeg 和中文字幕字体。数据库、媒体、加密密钥及初始化口令都保存在挂载到 `/data` 的 `daydream-data` 命名卷中。`docker compose down` 后这些数据仍保留；`docker compose down -v` 会删除数据卷及其中全部数据。备份需保留整个 `/data`，并在服务停止后进行；同一数据卷只供一个应用实例使用。
+
+Compose 默认只向宿主机的 `127.0.0.1:3000` 发布端口。修改宿主机端口时，例如 `127.0.0.1:8080:3000`，容器内端口仍保持 `3000`。如需通过其他主机名访问，在 `compose.yaml` 中调整端口绑定，并在 `TRUSTED_HOSTS` 中加入实际域名或 IP（不含协议和端口，逗号分隔，保留 `127.0.0.1` 供健康检查使用）。
+
+也可直接构建和运行镜像：
+
+```sh
+docker build -t daydream:local .
+docker run -d --name daydream --init --restart unless-stopped \
+  -p 127.0.0.1:3000:3000 \
+  -v daydream-data:/data \
+  daydream:local
+```
+
+镜像不会包含本机 `.env.local`、项目数据或 API Key。需要用环境变量配置模型时，`docker run` 可添加 `--env-file /path/to/docker.env`；Compose 则可在服务中添加 `env_file`。环境文件只填写所需模型变量，路径和监听配置使用上面的容器值。不要把凭据写入 Dockerfile。容器中添加管理员可执行：
+
+```sh
+docker compose exec daydream npm run admin:create -- <管理员手机号>
+```
+
+如需把镜像传到其他机器，使用相同 CPU 架构构建后导出、传输并加载：
+
+```sh
+docker save -o daydream-image.tar daydream:local
+# 在目标机器上执行：
+docker load -i daydream-image.tar
+```
+
+镜像包含平台相关的 FFmpeg 和 Node 依赖；跨 CPU 架构部署时需要为目标平台重新构建，例如 `docker buildx build --platform linux/amd64 -t daydream:local --load .`。镜像不包含数据卷；已有数据需要单独备份和恢复。
+
 ## 开发
 
 技术栈：Next.js App Router、React、TypeScript、Node.js、SQLite、shadcn/ui 和 Tailwind CSS。

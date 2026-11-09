@@ -12,7 +12,7 @@ import { stopRendering } from "../src/lib/server/render";
 import { mediaResponse } from "../src/lib/server/media";
 const dev = !process.argv.includes("--production"),
   port = Number(process.env.PORT || 3000),
-  hostname = "127.0.0.1";
+  hostname = process.env.HOST || "127.0.0.1";
 // Reserve the application port before running migrations or recovering tasks.
 const server = http.createServer();
 await new Promise<void>((resolve, reject) => {

@@ -1,0 +1,18 @@
+services:
+  daydream:
+    image: daydream:local
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATA_DIR: /data
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-localhost,127.0.0.1,[::1]}
+    volumes:
+      - daydream-data:/data
+
+volumes:
+  daydream-data:
